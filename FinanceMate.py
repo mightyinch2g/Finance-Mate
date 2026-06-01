@@ -1,12 +1,14 @@
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime
 import sqlite3
-from typing import Dict, Callable, List, Tuple
+from typing import Dict, Callable, List
 
 APP_NAME = "Finance Mate"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "data" / "finance_mate.db"
 
@@ -27,6 +29,7 @@ FOOTER_HEIGHT = 26
 SIDEBAR_WIDTH = 265
 WINDOW_WIDTH = 1440
 WINDOW_HEIGHT = 900
+DATE_FMT = "%d.%m.%Y"
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,25 @@ def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def parse_amount(raw_value: str) -> float:
+    value = (raw_value or "").strip().replace(".", "").replace(",", ".")
+    if not value:
+        return 0.0
+    return round(float(value), 2)
+
+
+def format_amount(value: float) -> str:
+    return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def validate_date(date_text: str) -> str:
+    try:
+        parsed = datetime.strptime(date_text.strip(), DATE_FMT)
+        return parsed.strftime(DATE_FMT)
+    except Exception as exc:
+        raise ValueError("Datum muss im Format TT.MM.JJJJ eingegeben werden.") from exc
 
 
 def init_sqlite() -> None:
@@ -137,6 +159,34 @@ def init_sqlite() -> None:
                 iban TEXT NOT NULL UNIQUE,
                 bank_name TEXT NOT NULL,
                 account_owner TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS journal_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_no TEXT NOT NULL UNIQUE,
+                booking_date TEXT NOT NULL,
+                posting_text TEXT NOT NULL,
+                total_debit REAL NOT NULL,
+                total_credit REAL NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS journal_entry_lines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                journal_entry_id INTEGER NOT NULL,
+                line_no INTEGER NOT NULL,
+                account_no TEXT NOT NULL,
+                account_name TEXT NOT NULL,
+                debit REAL NOT NULL DEFAULT 0,
+                credit REAL NOT NULL DEFAULT 0,
+                line_text TEXT,
+                FOREIGN KEY (journal_entry_id) REFERENCES journal_entries(id)
             )
             """
         )
@@ -462,6 +512,398 @@ class StammdatenView(tk.Frame):
             messagebox.showerror(APP_NAME, f"Speichern fehlgeschlagen:\n{exc}")
 
 
+class JournalView(tk.Frame):
+    def __init__(self, parent: tk.Widget, status_callback: Callable[[str], None]):
+        super().__init__(parent, bg=BG)
+        self.status_callback = status_callback
+        self.line_items: List[dict] = []
+        self.account_map = self._load_accounts()
+        self.account_display_map = {f"{no} | {name}": {"account_no": no, "name": name} for no, name in self.account_map.items()}
+        self._build_ui()
+        self.reload_journal_entries()
+        self._update_totals()
+
+    def _load_accounts(self) -> Dict[str, str]:
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT account_no, name FROM gl_accounts WHERE active = 1 ORDER BY account_no"
+            ).fetchall()
+            return {row["account_no"]: row["name"] for row in rows}
+        finally:
+            conn.close()
+
+    def _build_ui(self) -> None:
+        self.grid_rowconfigure(2, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(self, text="Finanzbuchhaltung", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(
+            self,
+            text="Block 4: Journalbuchungen mit Soll/Haben-Prüfung, Buchungszeilen und Speicherung in SQLite.",
+            style="Hint.TLabel",
+            wraplength=1000,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(0, 12))
+
+        shell = tk.Frame(self, bg=BG)
+        shell.grid(row=2, column=0, sticky="nsew")
+        shell.grid_rowconfigure(0, weight=1)
+        shell.grid_columnconfigure(0, weight=7)
+        shell.grid_columnconfigure(1, weight=5)
+
+        left_outer = tk.Frame(shell, bg=CARD_BORDER)
+        left_outer.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left = tk.Frame(left_outer, bg=WHITE)
+        left.pack(fill="both", expand=True, padx=1, pady=1)
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(3, weight=1)
+
+        right_outer = tk.Frame(shell, bg=CARD_BORDER)
+        right_outer.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        right = tk.Frame(right_outer, bg=WHITE)
+        right.pack(fill="both", expand=True, padx=1, pady=1)
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(2, weight=1)
+
+        # Kopfbereich Journal
+        header = tk.Frame(left, bg=WHITE)
+        header.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+        for idx in range(4):
+            header.grid_columnconfigure(idx, weight=1)
+
+        self.document_no_var = tk.StringVar(value=self._generate_document_no())
+        self.booking_date_var = tk.StringVar(value=datetime.now().strftime(DATE_FMT))
+        self.posting_text_var = tk.StringVar()
+
+        self._labeled_entry(header, 0, 0, "Belegnummer", self.document_no_var)
+        self._labeled_entry(header, 0, 1, "Buchungsdatum", self.booking_date_var)
+        self._labeled_entry(header, 0, 2, "Buchungstext", self.posting_text_var, columnspan=2)
+
+        # Zeilenerfassung
+        line_box_outer = tk.Frame(left, bg=CARD_BORDER)
+        line_box_outer.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
+        line_box = tk.Frame(line_box_outer, bg=WHITE)
+        line_box.pack(fill="both", expand=True, padx=1, pady=1)
+        for idx in range(6):
+            line_box.grid_columnconfigure(idx, weight=1)
+
+        tk.Label(line_box, text="Buchungszeile hinzufügen", bg=WHITE, fg=TEXT, font=("Segoe UI", 11, "bold")).grid(row=0, column=0, columnspan=6, sticky="w", padx=12, pady=(12, 8))
+
+        account_choices = list(self.account_display_map.keys())
+        self.line_account_var = tk.StringVar(value=account_choices[0] if account_choices else "")
+        self.line_text_var = tk.StringVar()
+        self.line_debit_var = tk.StringVar()
+        self.line_credit_var = tk.StringVar()
+
+        self._labeled_combo(line_box, 1, 0, "Konto", self.line_account_var, account_choices, width=34)
+        self._labeled_entry(line_box, 1, 2, "Zeilentext", self.line_text_var)
+        self._labeled_entry(line_box, 1, 3, "Soll", self.line_debit_var)
+        self._labeled_entry(line_box, 1, 4, "Haben", self.line_credit_var)
+
+        action_row = tk.Frame(line_box, bg=WHITE)
+        action_row.grid(row=1, column=5, sticky="ew", padx=12, pady=(22, 12))
+        ttk.Button(action_row, text="Zeile hinzufügen", command=self.add_line_item).pack(fill="x")
+        ttk.Button(action_row, text="Zeile leeren", command=self.clear_line_inputs).pack(fill="x", pady=(8, 0))
+
+        # Zeilen-Tree
+        tree_outer = tk.Frame(left, bg=CARD_BORDER)
+        tree_outer.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 12))
+        tree_inner = tk.Frame(tree_outer, bg=WHITE)
+        tree_inner.pack(fill="both", expand=True, padx=1, pady=1)
+        tree_inner.grid_rowconfigure(0, weight=1)
+        tree_inner.grid_columnconfigure(0, weight=1)
+
+        self.lines_tree = ttk.Treeview(
+            tree_inner,
+            columns=("line_no", "account_no", "account_name", "line_text", "debit", "credit"),
+            show="headings",
+            height=10,
+        )
+        self.lines_tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar_y = ttk.Scrollbar(tree_inner, orient="vertical", command=self.lines_tree.yview)
+        scrollbar_y.grid(row=0, column=1, sticky="ns")
+        self.lines_tree.configure(yscrollcommand=scrollbar_y.set)
+
+        headings = [
+            ("line_no", "Pos", 45),
+            ("account_no", "Konto", 90),
+            ("account_name", "Bezeichnung", 190),
+            ("line_text", "Zeilentext", 200),
+            ("debit", "Soll", 90),
+            ("credit", "Haben", 90),
+        ]
+        for key, title, width in headings:
+            self.lines_tree.heading(key, text=title)
+            self.lines_tree.column(key, width=width, anchor="w")
+
+        # Footer links
+        footer_left = tk.Frame(left, bg=WHITE)
+        footer_left.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 16))
+        footer_left.grid_columnconfigure(0, weight=1)
+
+        self.total_label = tk.Label(footer_left, text="Soll: 0,00 | Haben: 0,00 | Differenz: 0,00", bg=WHITE, fg=TEXT2, font=("Segoe UI", 10, "bold"))
+        self.total_label.grid(row=0, column=0, sticky="w")
+
+        button_row = tk.Frame(footer_left, bg=WHITE)
+        button_row.grid(row=0, column=1, sticky="e")
+        ttk.Button(button_row, text="Markierte Zeile löschen", command=self.remove_selected_line).pack(side="left")
+        ttk.Button(button_row, text="Beleg leeren", command=self.clear_journal_form).pack(side="left", padx=(8, 0))
+        ttk.Button(button_row, text="Buchung speichern", command=self.save_journal_entry).pack(side="left", padx=(8, 0))
+
+        # Rechte Seite: letzte Buchungen
+        tk.Label(right, text="Letzte Buchungen", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(16, 6))
+        tk.Label(right, text="Zu Kontrollzwecken werden die letzten 50 Journalbelege mit Summen angezeigt.", bg=WHITE, fg=TEXT2, font=("Segoe UI", 9), wraplength=360, justify="left").grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+
+        history_outer = tk.Frame(right, bg=CARD_BORDER)
+        history_outer.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        history_inner = tk.Frame(history_outer, bg=WHITE)
+        history_inner.pack(fill="both", expand=True, padx=1, pady=1)
+        history_inner.grid_rowconfigure(0, weight=1)
+        history_inner.grid_columnconfigure(0, weight=1)
+
+        self.history_tree = ttk.Treeview(
+            history_inner,
+            columns=("document_no", "booking_date", "posting_text", "total_debit", "line_count"),
+            show="headings",
+            height=18,
+        )
+        self.history_tree.grid(row=0, column=0, sticky="nsew")
+        history_scroll = ttk.Scrollbar(history_inner, orient="vertical", command=self.history_tree.yview)
+        history_scroll.grid(row=0, column=1, sticky="ns")
+        self.history_tree.configure(yscrollcommand=history_scroll.set)
+
+        history_headings = [
+            ("document_no", "Beleg", 120),
+            ("booking_date", "Datum", 90),
+            ("posting_text", "Text", 180),
+            ("total_debit", "Summe", 90),
+            ("line_count", "Zeilen", 70),
+        ]
+        for key, title, width in history_headings:
+            self.history_tree.heading(key, text=title)
+            self.history_tree.column(key, width=width, anchor="w")
+
+    def _labeled_entry(self, parent: tk.Widget, row: int, column: int, label: str, variable: tk.StringVar, columnspan: int = 1) -> None:
+        box = tk.Frame(parent, bg=WHITE)
+        box.grid(row=row, column=column, columnspan=columnspan, sticky="ew", padx=12, pady=4)
+        tk.Label(box, text=label, bg=WHITE, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        ttk.Entry(box, textvariable=variable).pack(fill="x", pady=(4, 0))
+
+    def _labeled_combo(self, parent: tk.Widget, row: int, column: int, label: str, variable: tk.StringVar, values: List[str], width: int = 20) -> None:
+        box = tk.Frame(parent, bg=WHITE)
+        box.grid(row=row, column=column, columnspan=2, sticky="ew", padx=12, pady=4)
+        tk.Label(box, text=label, bg=WHITE, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        combo = ttk.Combobox(box, textvariable=variable, values=values, state="readonly", width=width)
+        combo.pack(fill="x", pady=(4, 0))
+        if values and not variable.get():
+            combo.set(values[0])
+
+    def _generate_document_no(self) -> str:
+        return "FM-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    def clear_line_inputs(self) -> None:
+        self.line_text_var.set("")
+        self.line_debit_var.set("")
+        self.line_credit_var.set("")
+        choices = list(self.account_display_map.keys())
+        if choices:
+            self.line_account_var.set(choices[0])
+
+    def add_line_item(self) -> None:
+        if not self.account_display_map:
+            messagebox.showwarning(APP_NAME, "Bitte zuerst mindestens ein Sachkonto im Modul Stammdaten anlegen.")
+            return
+
+        account_display = self.line_account_var.get().strip()
+        line_text = self.line_text_var.get().strip()
+        debit = parse_amount(self.line_debit_var.get())
+        credit = parse_amount(self.line_credit_var.get())
+
+        if account_display not in self.account_display_map:
+            messagebox.showwarning(APP_NAME, "Bitte ein gültiges Konto auswählen.")
+            return
+        if debit > 0 and credit > 0:
+            messagebox.showwarning(APP_NAME, "Eine Buchungszeile darf nur Soll oder Haben enthalten, nicht beides.")
+            return
+        if debit <= 0 and credit <= 0:
+            messagebox.showwarning(APP_NAME, "Bitte einen Wert im Soll oder Haben eingeben.")
+            return
+
+        account_data = self.account_display_map[account_display]
+        line = {
+            "line_no": len(self.line_items) + 1,
+            "account_no": account_data["account_no"],
+            "account_name": account_data["name"],
+            "line_text": line_text,
+            "debit": debit,
+            "credit": credit,
+        }
+        self.line_items.append(line)
+        self._refresh_lines_tree()
+        self._update_totals()
+        self.clear_line_inputs()
+        self.status_callback("Buchungszeile hinzugefügt")
+
+    def _refresh_lines_tree(self) -> None:
+        for item in self.lines_tree.get_children():
+            self.lines_tree.delete(item)
+
+        for idx, line in enumerate(self.line_items, start=1):
+            line["line_no"] = idx
+            self.lines_tree.insert(
+                "",
+                "end",
+                values=(
+                    idx,
+                    line["account_no"],
+                    line["account_name"],
+                    line["line_text"],
+                    format_amount(line["debit"]),
+                    format_amount(line["credit"]),
+                ),
+            )
+
+    def _update_totals(self) -> None:
+        total_debit = round(sum(item["debit"] for item in self.line_items), 2)
+        total_credit = round(sum(item["credit"] for item in self.line_items), 2)
+        diff = round(total_debit - total_credit, 2)
+        self.total_label.config(
+            text=f"Soll: {format_amount(total_debit)} | Haben: {format_amount(total_credit)} | Differenz: {format_amount(diff)}",
+            fg=SUCCESS if abs(diff) < 0.0001 and total_debit > 0 else RED,
+        )
+
+    def remove_selected_line(self) -> None:
+        selected = self.lines_tree.selection()
+        if not selected:
+            messagebox.showinfo(APP_NAME, "Bitte zuerst eine Zeile markieren.")
+            return
+        item_id = selected[0]
+        values = self.lines_tree.item(item_id, "values")
+        line_no = int(values[0])
+        self.line_items = [line for line in self.line_items if line["line_no"] != line_no]
+        self._refresh_lines_tree()
+        self._update_totals()
+        self.status_callback("Buchungszeile gelöscht")
+
+    def clear_journal_form(self) -> None:
+        self.document_no_var.set(self._generate_document_no())
+        self.booking_date_var.set(datetime.now().strftime(DATE_FMT))
+        self.posting_text_var.set("")
+        self.line_items.clear()
+        self._refresh_lines_tree()
+        self._update_totals()
+        self.clear_line_inputs()
+        self.status_callback("Journalmaske geleert")
+
+    def save_journal_entry(self) -> None:
+        try:
+            document_no = self.document_no_var.get().strip() or self._generate_document_no()
+            booking_date = validate_date(self.booking_date_var.get())
+            posting_text = self.posting_text_var.get().strip()
+
+            if not posting_text:
+                raise ValueError("Bitte einen Buchungstext erfassen.")
+            if len(self.line_items) < 2:
+                raise ValueError("Für eine Buchung werden mindestens 2 Buchungszeilen benötigt.")
+
+            total_debit = round(sum(item["debit"] for item in self.line_items), 2)
+            total_credit = round(sum(item["credit"] for item in self.line_items), 2)
+            if total_debit <= 0 or total_credit <= 0:
+                raise ValueError("Soll- und Habensumme müssen größer 0 sein.")
+            if round(total_debit - total_credit, 2) != 0:
+                raise ValueError("Soll und Haben sind nicht ausgeglichen.")
+
+            conn = get_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO journal_entries (
+                        document_no, booking_date, posting_text, total_debit, total_credit, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        document_no,
+                        booking_date,
+                        posting_text,
+                        total_debit,
+                        total_credit,
+                        datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
+                    ),
+                )
+                journal_entry_id = cur.lastrowid
+
+                for idx, item in enumerate(self.line_items, start=1):
+                    cur.execute(
+                        """
+                        INSERT INTO journal_entry_lines (
+                            journal_entry_id, line_no, account_no, account_name, debit, credit, line_text
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            journal_entry_id,
+                            idx,
+                            item["account_no"],
+                            item["account_name"],
+                            item["debit"],
+                            item["credit"],
+                            item["line_text"],
+                        ),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+
+            self.reload_journal_entries()
+            self.clear_journal_form()
+            self.status_callback(f"Journalbuchung gespeichert: {document_no}")
+            messagebox.showinfo(APP_NAME, f"Die Buchung {document_no} wurde erfolgreich gespeichert.")
+        except sqlite3.IntegrityError:
+            messagebox.showerror(APP_NAME, "Die Belegnummer existiert bereits. Bitte eine neue Belegnummer verwenden.")
+        except ValueError as exc:
+            messagebox.showwarning(APP_NAME, str(exc))
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f"Buchung konnte nicht gespeichert werden:\n{exc}")
+
+    def reload_journal_entries(self) -> None:
+        for item in self.history_tree.get_children():
+            self.history_tree.delete(item)
+
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT je.document_no,
+                       je.booking_date,
+                       je.posting_text,
+                       je.total_debit,
+                       COUNT(jel.id) AS line_count
+                  FROM journal_entries je
+                  LEFT JOIN journal_entry_lines jel
+                    ON je.id = jel.journal_entry_id
+              GROUP BY je.id, je.document_no, je.booking_date, je.posting_text, je.total_debit
+              ORDER BY je.id DESC
+                 LIMIT 50
+                """
+            ).fetchall()
+        finally:
+            conn.close()
+
+        for row in rows:
+            self.history_tree.insert(
+                "",
+                "end",
+                values=(
+                    row["document_no"],
+                    row["booking_date"],
+                    row["posting_text"],
+                    format_amount(row["total_debit"]),
+                    row["line_count"],
+                ),
+            )
+
+
 class FinanceMateApp(tk.Tk):
     def __init__(self, config: AppConfig | None = None):
         super().__init__()
@@ -534,13 +976,7 @@ class FinanceMateApp(tk.Tk):
         self.grid_columnconfigure(1, weight=1)
 
     def _build_header(self) -> None:
-        self.header_frame = tk.Frame(
-            self,
-            bg=HEADER,
-            height=HEADER_HEIGHT,
-            highlightthickness=1,
-            highlightbackground=LINE,
-        )
+        self.header_frame = tk.Frame(self, bg=HEADER, height=HEADER_HEIGHT, highlightthickness=1, highlightbackground=LINE)
         self.header_frame.grid(row=0, column=0, columnspan=2, sticky="nsew")
         self.header_frame.grid_propagate(False)
         self.header_frame.grid_columnconfigure(0, weight=1)
@@ -548,11 +984,10 @@ class FinanceMateApp(tk.Tk):
 
         title_wrap = tk.Frame(self.header_frame, bg=HEADER)
         title_wrap.grid(row=0, column=0, sticky="w", padx=18)
-
         tk.Label(title_wrap, text=APP_NAME, bg=HEADER, fg=BLUE, font=("Segoe UI", 24, "bold")).pack(anchor="w")
         tk.Label(
             title_wrap,
-            text="Startarchitektur v0.1 – Desktop, Fullscreen, SQLite-Stammdaten aktiv",
+            text="Startarchitektur v0.1 – Desktop, Fullscreen, Journalbuchung aktiv",
             bg=HEADER,
             fg=TEXT2,
             font=("Segoe UI", 10),
@@ -654,25 +1089,25 @@ class FinanceMateApp(tk.Tk):
 
     def _render_dashboard(self) -> None:
         wrapper = self._create_two_by_two_grid()
-        self._card(wrapper, 0, 0, "Systemstart", "Finance Mate startet jetzt im Fullscreen/Maximiert-Modus und initialisiert SQLite automatisch.")
-        self._card(wrapper, 0, 1, "Stammdaten aktiv", "Sachkonten, Debitoren, Kreditoren, Steuerkennzeichen, Zahlungsbedingungen und Bankkonten sind jetzt als SQLite-Tabellen angelegt.")
-        self._card(wrapper, 1, 0, "Nächste Coding-Blöcke", "1) Journalbuchungen\n2) Debitoren-/Kreditorenlogik\n3) Zahlungen\n4) Reporting")
-        self._card(wrapper, 1, 1, "Projektstatus", "Start bei 0 Nutzern. Zielarchitektur bleibt vorbereitet für späteren PostgreSQL-Multiuser-Betrieb.")
+        self._card(wrapper, 0, 0, "Systemstart", "Finance Mate startet maximiert und initialisiert SQLite automatisch.")
+        self._card(wrapper, 0, 1, "Block 4 aktiv", "Journalbuchungen sind jetzt mit Belegkopf, Buchungszeilen und Soll/Haben-Prüfung umgesetzt.")
+        self._card(wrapper, 1, 0, "Nächste Coding-Blöcke", "1) Debitoren-/Kreditorenlogik\n2) Zahlungen\n3) Reporting\n4) Audit")
+        self._card(wrapper, 1, 1, "Projektstatus", "Stammdaten und Finanzbuchhaltung sind jetzt in SQLite persistiert und bilden die Kernbasis für weitere Prozesse.")
 
     def _render_stammdaten(self) -> None:
         view = StammdatenView(self.content_frame, self.set_status)
         view.grid(row=0, column=0, sticky="nsew")
 
     def _render_finanzbuchhaltung(self) -> None:
-        frame = self._create_single_area("Finanzbuchhaltung", "Geplant für Block 4: Journalbuchungen, Buchungsvalidierung, Soll/Haben-Logik, Belegnummern und Storno.")
-        self._list_block(frame, ["Journalbuchung", "Buchungssätze", "Beleglogik", "Periodenprüfung", "Buchungshistorie"])
+        view = JournalView(self.content_frame, self.set_status)
+        view.grid(row=0, column=0, sticky="nsew")
 
     def _render_debitoren(self) -> None:
-        frame = self._create_single_area("Debitoren", "Hier entsteht die Forderungslogik: Ausgangsrechnungen, offene Posten, Zahlungseingänge und Ausgleich.")
+        frame = self._create_single_area("Debitoren", "Nächster Block: Ausgangsrechnungen, offene Posten, Zahlungseingänge und Ausgleich.")
         self._list_block(frame, ["Ausgangsrechnungen", "Offene Posten", "Zahlungseingänge", "Teilzahlungen", "Mahnstatus-Basis"])
 
     def _render_kreditoren(self) -> None:
-        frame = self._create_single_area("Kreditoren", "Hier entsteht die Verbindlichkeitenlogik: Eingangsrechnungen, Fälligkeiten, Zahlungen und Ausgleich.")
+        frame = self._create_single_area("Kreditoren", "Nächster Block: Eingangsrechnungen, Fälligkeiten, Zahlungen und Ausgleich.")
         self._list_block(frame, ["Eingangsrechnungen", "Offene Posten", "Fälligkeitsübersicht", "Zahlungsausgang", "Ausgleich"])
 
     def _render_zahlungen(self) -> None:
