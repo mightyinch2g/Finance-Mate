@@ -1,0 +1,2 @@
+# Startpaket für Finance Mate v0.1
+# tkinter ist in Python unter Windows normalerweise bereits enthalten.
