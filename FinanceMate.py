@@ -3,12 +3,12 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from dataclasses import dataclass
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import sqlite3
 from typing import Dict, Callable, List
 
 APP_NAME = "Finance Mate"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "data" / "finance_mate.db"
 
@@ -23,6 +23,7 @@ TEXT2 = "#445364"
 WHITE = "#FFFFFF"
 CARD_BORDER = "#B7C6D5"
 SUCCESS = "#1F7A1F"
+WARNING = "#A15C00"
 
 HEADER_HEIGHT = 72
 FOOTER_HEIGHT = 26
@@ -71,7 +72,7 @@ def parse_amount(raw_value: str) -> float:
 
 
 def format_amount(value: float) -> str:
-    return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{float(value):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def validate_date(date_text: str) -> str:
@@ -80,6 +81,11 @@ def validate_date(date_text: str) -> str:
         return parsed.strftime(DATE_FMT)
     except Exception as exc:
         raise ValueError("Datum muss im Format TT.MM.JJJJ eingegeben werden.") from exc
+
+
+def calc_due_date(invoice_date: str, due_days: int) -> str:
+    parsed = datetime.strptime(validate_date(invoice_date), DATE_FMT)
+    return (parsed + timedelta(days=int(due_days))).strftime(DATE_FMT)
 
 
 def init_sqlite() -> None:
@@ -187,6 +193,41 @@ def init_sqlite() -> None:
                 credit REAL NOT NULL DEFAULT 0,
                 line_text TEXT,
                 FOREIGN KEY (journal_entry_id) REFERENCES journal_entries(id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS customer_invoices (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                invoice_no TEXT NOT NULL UNIQUE,
+                customer_no TEXT NOT NULL,
+                customer_name TEXT NOT NULL,
+                invoice_date TEXT NOT NULL,
+                due_date TEXT NOT NULL,
+                posting_text TEXT NOT NULL,
+                amount REAL NOT NULL,
+                tax_code TEXT,
+                payment_term_code TEXT,
+                status TEXT NOT NULL DEFAULT 'Offen',
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS open_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_type TEXT NOT NULL,
+                reference_no TEXT NOT NULL UNIQUE,
+                partner_no TEXT NOT NULL,
+                partner_name TEXT NOT NULL,
+                invoice_date TEXT NOT NULL,
+                due_date TEXT NOT NULL,
+                amount REAL NOT NULL,
+                open_amount REAL NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
             )
             """
         )
@@ -316,7 +357,7 @@ class StammdatenView(tk.Frame):
         ttk.Label(self, text="Stammdaten", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
         ttk.Label(
             self,
-            text="Block 3: Erste Stammdaten sind jetzt mit SQLite verbunden. Neue Einträge können direkt erfasst und gespeichert werden.",
+            text="Block 3: Erste Stammdaten sind mit SQLite verbunden. Fine-Tuning wie Umbenennen, Bearbeiten und erweiterte Validierung wird in einer spaeteren Optimierungsphase ergaenzt.",
             style="Hint.TLabel",
             wraplength=1000,
             justify="left",
@@ -463,6 +504,8 @@ class StammdatenView(tk.Frame):
                 value = row[key]
                 if key == "active":
                     value = "Ja" if value == 1 else "Nein"
+                elif key == "rate":
+                    value = format_amount(value)
                 values.append(value)
             tree.insert("", "end", values=values)
 
@@ -526,9 +569,7 @@ class JournalView(tk.Frame):
     def _load_accounts(self) -> Dict[str, str]:
         conn = get_connection()
         try:
-            rows = conn.execute(
-                "SELECT account_no, name FROM gl_accounts WHERE active = 1 ORDER BY account_no"
-            ).fetchall()
+            rows = conn.execute("SELECT account_no, name FROM gl_accounts WHERE active = 1 ORDER BY account_no").fetchall()
             return {row["account_no"]: row["name"] for row in rows}
         finally:
             conn.close()
@@ -566,7 +607,6 @@ class JournalView(tk.Frame):
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(2, weight=1)
 
-        # Kopfbereich Journal
         header = tk.Frame(left, bg=WHITE)
         header.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
         for idx in range(4):
@@ -580,7 +620,6 @@ class JournalView(tk.Frame):
         self._labeled_entry(header, 0, 1, "Buchungsdatum", self.booking_date_var)
         self._labeled_entry(header, 0, 2, "Buchungstext", self.posting_text_var, columnspan=2)
 
-        # Zeilenerfassung
         line_box_outer = tk.Frame(left, bg=CARD_BORDER)
         line_box_outer.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
         line_box = tk.Frame(line_box_outer, bg=WHITE)
@@ -606,7 +645,6 @@ class JournalView(tk.Frame):
         ttk.Button(action_row, text="Zeile hinzufügen", command=self.add_line_item).pack(fill="x")
         ttk.Button(action_row, text="Zeile leeren", command=self.clear_line_inputs).pack(fill="x", pady=(8, 0))
 
-        # Zeilen-Tree
         tree_outer = tk.Frame(left, bg=CARD_BORDER)
         tree_outer.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 12))
         tree_inner = tk.Frame(tree_outer, bg=WHITE)
@@ -625,19 +663,17 @@ class JournalView(tk.Frame):
         scrollbar_y.grid(row=0, column=1, sticky="ns")
         self.lines_tree.configure(yscrollcommand=scrollbar_y.set)
 
-        headings = [
+        for key, title, width in [
             ("line_no", "Pos", 45),
             ("account_no", "Konto", 90),
             ("account_name", "Bezeichnung", 190),
             ("line_text", "Zeilentext", 200),
             ("debit", "Soll", 90),
             ("credit", "Haben", 90),
-        ]
-        for key, title, width in headings:
+        ]:
             self.lines_tree.heading(key, text=title)
             self.lines_tree.column(key, width=width, anchor="w")
 
-        # Footer links
         footer_left = tk.Frame(left, bg=WHITE)
         footer_left.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 16))
         footer_left.grid_columnconfigure(0, weight=1)
@@ -651,7 +687,6 @@ class JournalView(tk.Frame):
         ttk.Button(button_row, text="Beleg leeren", command=self.clear_journal_form).pack(side="left", padx=(8, 0))
         ttk.Button(button_row, text="Buchung speichern", command=self.save_journal_entry).pack(side="left", padx=(8, 0))
 
-        # Rechte Seite: letzte Buchungen
         tk.Label(right, text="Letzte Buchungen", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(16, 6))
         tk.Label(right, text="Zu Kontrollzwecken werden die letzten 50 Journalbelege mit Summen angezeigt.", bg=WHITE, fg=TEXT2, font=("Segoe UI", 9), wraplength=360, justify="left").grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
 
@@ -673,14 +708,13 @@ class JournalView(tk.Frame):
         history_scroll.grid(row=0, column=1, sticky="ns")
         self.history_tree.configure(yscrollcommand=history_scroll.set)
 
-        history_headings = [
+        for key, title, width in [
             ("document_no", "Beleg", 120),
             ("booking_date", "Datum", 90),
             ("posting_text", "Text", 180),
             ("total_debit", "Summe", 90),
             ("line_count", "Zeilen", 70),
-        ]
-        for key, title, width in history_headings:
+        ]:
             self.history_tree.heading(key, text=title)
             self.history_tree.column(key, width=width, anchor="w")
 
@@ -748,20 +782,12 @@ class JournalView(tk.Frame):
     def _refresh_lines_tree(self) -> None:
         for item in self.lines_tree.get_children():
             self.lines_tree.delete(item)
-
         for idx, line in enumerate(self.line_items, start=1):
             line["line_no"] = idx
             self.lines_tree.insert(
                 "",
                 "end",
-                values=(
-                    idx,
-                    line["account_no"],
-                    line["account_name"],
-                    line["line_text"],
-                    format_amount(line["debit"]),
-                    format_amount(line["credit"]),
-                ),
+                values=(idx, line["account_no"], line["account_name"], line["line_text"], format_amount(line["debit"]), format_amount(line["credit"])),
             )
 
     def _update_totals(self) -> None:
@@ -819,37 +845,19 @@ class JournalView(tk.Frame):
                 cur = conn.cursor()
                 cur.execute(
                     """
-                    INSERT INTO journal_entries (
-                        document_no, booking_date, posting_text, total_debit, total_credit, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO journal_entries (document_no, booking_date, posting_text, total_debit, total_credit, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (
-                        document_no,
-                        booking_date,
-                        posting_text,
-                        total_debit,
-                        total_credit,
-                        datetime.now().strftime("%d.%m.%Y %H:%M:%S"),
-                    ),
+                    (document_no, booking_date, posting_text, total_debit, total_credit, datetime.now().strftime("%d.%m.%Y %H:%M:%S")),
                 )
                 journal_entry_id = cur.lastrowid
-
                 for idx, item in enumerate(self.line_items, start=1):
                     cur.execute(
                         """
-                        INSERT INTO journal_entry_lines (
-                            journal_entry_id, line_no, account_no, account_name, debit, credit, line_text
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        INSERT INTO journal_entry_lines (journal_entry_id, line_no, account_no, account_name, debit, credit, line_text)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (
-                            journal_entry_id,
-                            idx,
-                            item["account_no"],
-                            item["account_name"],
-                            item["debit"],
-                            item["credit"],
-                            item["line_text"],
-                        ),
+                        (journal_entry_id, idx, item["account_no"], item["account_name"], item["debit"], item["credit"], item["line_text"]),
                     )
                 conn.commit()
             finally:
@@ -869,19 +877,13 @@ class JournalView(tk.Frame):
     def reload_journal_entries(self) -> None:
         for item in self.history_tree.get_children():
             self.history_tree.delete(item)
-
         conn = get_connection()
         try:
             rows = conn.execute(
                 """
-                SELECT je.document_no,
-                       je.booking_date,
-                       je.posting_text,
-                       je.total_debit,
-                       COUNT(jel.id) AS line_count
+                SELECT je.document_no, je.booking_date, je.posting_text, je.total_debit, COUNT(jel.id) AS line_count
                   FROM journal_entries je
-                  LEFT JOIN journal_entry_lines jel
-                    ON je.id = jel.journal_entry_id
+                  LEFT JOIN journal_entry_lines jel ON je.id = jel.journal_entry_id
               GROUP BY je.id, je.document_no, je.booking_date, je.posting_text, je.total_debit
               ORDER BY je.id DESC
                  LIMIT 50
@@ -889,19 +891,345 @@ class JournalView(tk.Frame):
             ).fetchall()
         finally:
             conn.close()
-
         for row in rows:
-            self.history_tree.insert(
-                "",
-                "end",
-                values=(
-                    row["document_no"],
-                    row["booking_date"],
-                    row["posting_text"],
-                    format_amount(row["total_debit"]),
-                    row["line_count"],
-                ),
-            )
+            self.history_tree.insert("", "end", values=(row["document_no"], row["booking_date"], row["posting_text"], format_amount(row["total_debit"]), row["line_count"]))
+
+
+class DebitorsView(tk.Frame):
+    def __init__(self, parent: tk.Widget, status_callback: Callable[[str], None]):
+        super().__init__(parent, bg=BG)
+        self.status_callback = status_callback
+        self.customer_choices: List[str] = []
+        self.customer_display_map: Dict[str, Dict[str, str]] = {}
+        self.payment_term_choices: List[str] = []
+        self.payment_term_map: Dict[str, Dict[str, object]] = {}
+        self.tax_code_choices: List[str] = []
+        self.tax_code_map: Dict[str, Dict[str, object]] = {}
+        self._load_reference_data()
+        self._build_ui()
+        self.reload_invoices()
+        self.reload_open_items()
+
+    def _load_reference_data(self) -> None:
+        conn = get_connection()
+        try:
+            customer_rows = conn.execute("SELECT customer_no, name FROM customers WHERE active = 1 ORDER BY customer_no").fetchall()
+            self.customer_display_map = {f"{row['customer_no']} | {row['name']}": {"customer_no": row['customer_no'], "name": row['name']} for row in customer_rows}
+            self.customer_choices = list(self.customer_display_map.keys())
+
+            pt_rows = conn.execute("SELECT code, description, due_days FROM payment_terms ORDER BY code").fetchall()
+            self.payment_term_map = {f"{row['code']} | {row['description']} ({row['due_days']} Tage)": {"code": row['code'], "description": row['description'], "due_days": row['due_days']} for row in pt_rows}
+            self.payment_term_choices = list(self.payment_term_map.keys())
+
+            tax_rows = conn.execute("SELECT code, description, rate FROM tax_codes ORDER BY code").fetchall()
+            self.tax_code_map = {f"{row['code']} | {row['description']} ({format_amount(row['rate'])} %)": {"code": row['code'], "description": row['description'], "rate": row['rate']} for row in tax_rows}
+            self.tax_code_choices = list(self.tax_code_map.keys())
+        finally:
+            conn.close()
+
+    def _build_ui(self) -> None:
+        self.grid_rowconfigure(2, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        ttk.Label(self, text="Debitoren", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(
+            self,
+            text="Block 5: Ausgangsrechnungen, offene Posten und Fälligkeitslogik fuer Debitoren. Fine-Tuning wie Bearbeiten/Umbenennen wird in einer spaeteren Optimierungsphase ueber alle Module hinweg eingeplant.",
+            style="Hint.TLabel",
+            wraplength=1050,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(0, 12))
+
+        shell = tk.Frame(self, bg=BG)
+        shell.grid(row=2, column=0, sticky="nsew")
+        shell.grid_rowconfigure(0, weight=1)
+        shell.grid_columnconfigure(0, weight=6)
+        shell.grid_columnconfigure(1, weight=5)
+
+        left_outer = tk.Frame(shell, bg=CARD_BORDER)
+        left_outer.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left = tk.Frame(left_outer, bg=WHITE)
+        left.pack(fill="both", expand=True, padx=1, pady=1)
+        left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(3, weight=1)
+        left.grid_rowconfigure(5, weight=1)
+
+        right_outer = tk.Frame(shell, bg=CARD_BORDER)
+        right_outer.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        right = tk.Frame(right_outer, bg=WHITE)
+        right.pack(fill="both", expand=True, padx=1, pady=1)
+        right.grid_columnconfigure(0, weight=1)
+        right.grid_rowconfigure(2, weight=1)
+
+        form = tk.Frame(left, bg=WHITE)
+        form.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+        for idx in range(4):
+            form.grid_columnconfigure(idx, weight=1)
+
+        self.invoice_no_var = tk.StringVar(value=self._generate_invoice_no())
+        self.invoice_date_var = tk.StringVar(value=datetime.now().strftime(DATE_FMT))
+        self.posting_text_var = tk.StringVar()
+        self.amount_var = tk.StringVar()
+        self.due_date_var = tk.StringVar(value=datetime.now().strftime(DATE_FMT))
+        self.customer_var = tk.StringVar(value=self.customer_choices[0] if self.customer_choices else "")
+        self.payment_term_var = tk.StringVar(value=self.payment_term_choices[0] if self.payment_term_choices else "")
+        self.tax_code_var = tk.StringVar(value=self.tax_code_choices[0] if self.tax_code_choices else "")
+
+        self._labeled_entry(form, 0, 0, "Rechnungsnummer", self.invoice_no_var)
+        self._labeled_entry(form, 0, 1, "Rechnungsdatum", self.invoice_date_var)
+        self._labeled_entry(form, 0, 2, "Fälligkeitsdatum", self.due_date_var)
+        self._labeled_combo(form, 0, 3, "Debitor", self.customer_var, self.customer_choices, width=34)
+        self._labeled_combo(form, 1, 0, "Zahlungsbedingung", self.payment_term_var, self.payment_term_choices, width=34)
+        self._labeled_combo(form, 1, 1, "Steuerkennzeichen", self.tax_code_var, self.tax_code_choices, width=34)
+        self._labeled_entry(form, 1, 2, "Betrag", self.amount_var)
+        self._labeled_entry(form, 1, 3, "Buchungstext", self.posting_text_var)
+
+        action_row = tk.Frame(left, bg=WHITE)
+        action_row.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
+        ttk.Button(action_row, text="Fälligkeit aus Zahlungsbedingung", command=self.apply_payment_term).pack(side="left")
+        ttk.Button(action_row, text="Rechnung speichern", command=self.save_invoice).pack(side="left", padx=(8, 0))
+        ttk.Button(action_row, text="Felder leeren", command=self.clear_form).pack(side="left", padx=(8, 0))
+
+        tk.Label(left, text="Ausgangsrechnungen", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 8))
+        inv_outer = tk.Frame(left, bg=CARD_BORDER)
+        inv_outer.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 12))
+        inv_inner = tk.Frame(inv_outer, bg=WHITE)
+        inv_inner.pack(fill="both", expand=True, padx=1, pady=1)
+        inv_inner.grid_rowconfigure(0, weight=1)
+        inv_inner.grid_columnconfigure(0, weight=1)
+
+        self.invoice_tree = ttk.Treeview(
+            inv_inner,
+            columns=("invoice_no", "customer_name", "invoice_date", "due_date", "amount", "status"),
+            show="headings",
+            height=10,
+        )
+        self.invoice_tree.grid(row=0, column=0, sticky="nsew")
+        inv_scroll = ttk.Scrollbar(inv_inner, orient="vertical", command=self.invoice_tree.yview)
+        inv_scroll.grid(row=0, column=1, sticky="ns")
+        self.invoice_tree.configure(yscrollcommand=inv_scroll.set)
+        for key, title, width in [
+            ("invoice_no", "Rechnung", 120),
+            ("customer_name", "Debitor", 200),
+            ("invoice_date", "Datum", 85),
+            ("due_date", "Faelligkeit", 85),
+            ("amount", "Betrag", 90),
+            ("status", "Status", 90),
+        ]:
+            self.invoice_tree.heading(key, text=title)
+            self.invoice_tree.column(key, width=width, anchor="w")
+
+        tk.Label(left, text="Offene Posten Debitoren", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).grid(row=4, column=0, sticky="w", padx=16, pady=(0, 8))
+        op_outer = tk.Frame(left, bg=CARD_BORDER)
+        op_outer.grid(row=5, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        op_inner = tk.Frame(op_outer, bg=WHITE)
+        op_inner.pack(fill="both", expand=True, padx=1, pady=1)
+        op_inner.grid_rowconfigure(0, weight=1)
+        op_inner.grid_columnconfigure(0, weight=1)
+
+        self.open_item_tree = ttk.Treeview(
+            op_inner,
+            columns=("reference_no", "partner_name", "invoice_date", "due_date", "amount", "open_amount", "status"),
+            show="headings",
+            height=10,
+        )
+        self.open_item_tree.grid(row=0, column=0, sticky="nsew")
+        op_scroll = ttk.Scrollbar(op_inner, orient="vertical", command=self.open_item_tree.yview)
+        op_scroll.grid(row=0, column=1, sticky="ns")
+        self.open_item_tree.configure(yscrollcommand=op_scroll.set)
+        for key, title, width in [
+            ("reference_no", "Referenz", 120),
+            ("partner_name", "Debitor", 200),
+            ("invoice_date", "Datum", 85),
+            ("due_date", "Faelligkeit", 85),
+            ("amount", "Betrag", 90),
+            ("open_amount", "Offen", 90),
+            ("status", "Status", 90),
+        ]:
+            self.open_item_tree.heading(key, text=title)
+            self.open_item_tree.column(key, width=width, anchor="w")
+
+        tk.Label(right, text="Hinweise Block 5", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(16, 6))
+        tk.Label(
+            right,
+            text="In diesem Block werden Ausgangsrechnungen und offene Posten fuer Debitoren erzeugt. Die buchhalterische Verknuepfung zur Journalbuchung folgt in der spaeteren Vertiefung bzw. im Fine-Tuning und Integrationsschritt.",
+            bg=WHITE,
+            fg=TEXT2,
+            font=("Segoe UI", 9),
+            wraplength=360,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 10))
+
+        help_outer = tk.Frame(right, bg=CARD_BORDER)
+        help_outer.grid(row=2, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        help_inner = tk.Frame(help_outer, bg=WHITE)
+        help_inner.pack(fill="both", expand=True, padx=1, pady=1)
+        help_inner.grid_columnconfigure(0, weight=1)
+
+        infos = [
+            'Debitor muss in den Stammdaten vorhanden sein.',
+            'Rechnungsdatum und Faelligkeit muessen TT.MM.JJJJ sein.',
+            'Betrag wird als offener Posten angelegt.',
+            'Status startet bei Offen.',
+            'Fine-Tuning wie Bearbeiten, Storno, Nachbuchung und Textaenderungen wird projektweit spaeter eingeplant.'
+        ]
+        for idx, item in enumerate(infos):
+            row = tk.Frame(help_inner, bg=WHITE)
+            row.grid(row=idx, column=0, sticky="ew", padx=14, pady=(12 if idx == 0 else 6, 0))
+            tk.Label(row, text='•', bg=WHITE, fg=BLUE, font=("Segoe UI", 11, "bold")).pack(side='left')
+            tk.Label(row, text=item, bg=WHITE, fg=TEXT, font=("Segoe UI", 9), wraplength=330, justify='left').pack(side='left', padx=(8, 0))
+
+    def _generate_invoice_no(self) -> str:
+        return 'AR-' + datetime.now().strftime('%Y%m%d-%H%M%S')
+
+    def _labeled_entry(self, parent: tk.Widget, row: int, column: int, label: str, variable: tk.StringVar) -> None:
+        box = tk.Frame(parent, bg=WHITE)
+        box.grid(row=row, column=column, sticky='ew', padx=12, pady=4)
+        tk.Label(box, text=label, bg=WHITE, fg=TEXT, font=('Segoe UI', 9, 'bold')).pack(anchor='w')
+        ttk.Entry(box, textvariable=variable).pack(fill='x', pady=(4, 0))
+
+    def _labeled_combo(self, parent: tk.Widget, row: int, column: int, label: str, variable: tk.StringVar, choices: List[str], width: int = 24) -> None:
+        box = tk.Frame(parent, bg=WHITE)
+        box.grid(row=row, column=column, sticky='ew', padx=12, pady=4)
+        tk.Label(box, text=label, bg=WHITE, fg=TEXT, font=('Segoe UI', 9, 'bold')).pack(anchor='w')
+        combo = ttk.Combobox(box, textvariable=variable, values=choices, state='readonly', width=width)
+        combo.pack(fill='x', pady=(4, 0))
+        if choices and not variable.get():
+            combo.set(choices[0])
+
+    def apply_payment_term(self) -> None:
+        choice = self.payment_term_var.get().strip()
+        if choice and choice in self.payment_term_map:
+            due_days = int(self.payment_term_map[choice]['due_days'])
+            try:
+                self.due_date_var.set(calc_due_date(self.invoice_date_var.get(), due_days))
+                self.status_callback('Faelligkeit aus Zahlungsbedingung uebernommen')
+            except ValueError as exc:
+                messagebox.showwarning(APP_NAME, str(exc))
+
+    def clear_form(self) -> None:
+        self.invoice_no_var.set(self._generate_invoice_no())
+        self.invoice_date_var.set(datetime.now().strftime(DATE_FMT))
+        self.posting_text_var.set('')
+        self.amount_var.set('')
+        self.due_date_var.set(datetime.now().strftime(DATE_FMT))
+        if self.customer_choices:
+            self.customer_var.set(self.customer_choices[0])
+        if self.payment_term_choices:
+            self.payment_term_var.set(self.payment_term_choices[0])
+        if self.tax_code_choices:
+            self.tax_code_var.set(self.tax_code_choices[0])
+        self.status_callback('Debitorenformular geleert')
+
+    def save_invoice(self) -> None:
+        if not self.customer_choices:
+            messagebox.showwarning(APP_NAME, 'Bitte zuerst mindestens einen Debitor in den Stammdaten anlegen.')
+            return
+        try:
+            invoice_no = self.invoice_no_var.get().strip() or self._generate_invoice_no()
+            customer_choice = self.customer_var.get().strip()
+            if customer_choice not in self.customer_display_map:
+                raise ValueError('Bitte einen gueltigen Debitor auswaehlen.')
+            customer = self.customer_display_map[customer_choice]
+            invoice_date = validate_date(self.invoice_date_var.get())
+            due_date = validate_date(self.due_date_var.get())
+            posting_text = self.posting_text_var.get().strip()
+            amount = parse_amount(self.amount_var.get())
+            if not posting_text:
+                raise ValueError('Bitte einen Buchungstext erfassen.')
+            if amount <= 0:
+                raise ValueError('Der Rechnungsbetrag muss groesser 0 sein.')
+
+            tax_choice = self.tax_code_var.get().strip()
+            tax_code = self.tax_code_map[tax_choice]['code'] if tax_choice in self.tax_code_map else None
+            pt_choice = self.payment_term_var.get().strip()
+            payment_term_code = self.payment_term_map[pt_choice]['code'] if pt_choice in self.payment_term_map else None
+
+            conn = get_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO customer_invoices (
+                        invoice_no, customer_no, customer_name, invoice_date, due_date,
+                        posting_text, amount, tax_code, payment_term_code, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        invoice_no,
+                        customer['customer_no'],
+                        customer['name'],
+                        invoice_date,
+                        due_date,
+                        posting_text,
+                        amount,
+                        tax_code,
+                        payment_term_code,
+                        'Offen',
+                        datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
+                    ),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO open_items (
+                        item_type, reference_no, partner_no, partner_name, invoice_date, due_date,
+                        amount, open_amount, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        'Debitor',
+                        invoice_no,
+                        customer['customer_no'],
+                        customer['name'],
+                        invoice_date,
+                        due_date,
+                        amount,
+                        amount,
+                        'Offen',
+                        datetime.now().strftime('%d.%m.%Y %H:%M:%S'),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            self.reload_invoices()
+            self.reload_open_items()
+            self.clear_form()
+            self.status_callback(f'Debitorenrechnung gespeichert: {invoice_no}')
+            messagebox.showinfo(APP_NAME, f'Die Debitorenrechnung {invoice_no} wurde gespeichert und als offener Posten angelegt.')
+        except sqlite3.IntegrityError:
+            messagebox.showerror(APP_NAME, 'Die Rechnungsnummer existiert bereits.')
+        except ValueError as exc:
+            messagebox.showwarning(APP_NAME, str(exc))
+        except Exception as exc:
+            messagebox.showerror(APP_NAME, f'Debitorenrechnung konnte nicht gespeichert werden:\n{exc}')
+
+    def reload_invoices(self) -> None:
+        for item in self.invoice_tree.get_children():
+            self.invoice_tree.delete(item)
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT invoice_no, customer_name, invoice_date, due_date, amount, status FROM customer_invoices ORDER BY id DESC LIMIT 100"
+            ).fetchall()
+        finally:
+            conn.close()
+        for row in rows:
+            self.invoice_tree.insert('', 'end', values=(row['invoice_no'], row['customer_name'], row['invoice_date'], row['due_date'], format_amount(row['amount']), row['status']))
+
+    def reload_open_items(self) -> None:
+        for item in self.open_item_tree.get_children():
+            self.open_item_tree.delete(item)
+        conn = get_connection()
+        try:
+            rows = conn.execute(
+                "SELECT reference_no, partner_name, invoice_date, due_date, amount, open_amount, status FROM open_items WHERE item_type='Debitor' ORDER BY id DESC LIMIT 100"
+            ).fetchall()
+        finally:
+            conn.close()
+        for row in rows:
+            self.open_item_tree.insert('', 'end', values=(row['reference_no'], row['partner_name'], row['invoice_date'], row['due_date'], format_amount(row['amount']), format_amount(row['open_amount']), row['status']))
 
 
 class FinanceMateApp(tk.Tk):
@@ -916,17 +1244,10 @@ class FinanceMateApp(tk.Tk):
 
         self.nav_buttons: Dict[str, ttk.Button] = {}
         self.nav_order = [
-            "Dashboard",
-            "Stammdaten",
-            "Finanzbuchhaltung",
-            "Debitoren",
-            "Kreditoren",
-            "Zahlungen",
-            "Reporting",
-            "Audit",
-            "Einstellungen",
+            'Dashboard', 'Stammdaten', 'Finanzbuchhaltung', 'Debitoren', 'Kreditoren',
+            'Zahlungen', 'Reporting', 'Audit', 'Einstellungen'
         ]
-        self.active_module = tk.StringVar(value="Dashboard")
+        self.active_module = tk.StringVar(value='Dashboard')
 
         self._configure_ttk()
         self._build_layout()
@@ -934,42 +1255,24 @@ class FinanceMateApp(tk.Tk):
         self._build_sidebar()
         self._build_workspace()
         self._build_footer()
-        self.show_module("Dashboard")
+        self.show_module('Dashboard')
 
     def _configure_ttk(self) -> None:
         style = ttk.Style(self)
         try:
-            style.theme_use("clam")
+            style.theme_use('clam')
         except tk.TclError:
             pass
 
-        style.configure(
-            "Nav.TButton",
-            font=("Segoe UI", 10, "bold"),
-            padding=(12, 10),
-            foreground=TEXT,
-            background=WHITE,
-            borderwidth=1,
-            relief="solid",
-            anchor="w",
-        )
-        style.map("Nav.TButton", background=[("active", "#F4F7FA"), ("pressed", "#E7EEF5")])
-        style.configure(
-            "NavActive.TButton",
-            font=("Segoe UI", 10, "bold"),
-            padding=(12, 10),
-            foreground=BLUE,
-            background="#EAF1F8",
-            borderwidth=1,
-            relief="solid",
-            anchor="w",
-        )
-        style.map("NavActive.TButton", background=[("active", "#EAF1F8"), ("pressed", "#EAF1F8")])
-        style.configure("Card.TFrame", background=WHITE)
-        style.configure("CardTitle.TLabel", background=WHITE, foreground=TEXT, font=("Segoe UI", 12, "bold"))
-        style.configure("CardBody.TLabel", background=WHITE, foreground=TEXT2, font=("Segoe UI", 10))
-        style.configure("Section.TLabel", background=BG, foreground=TEXT, font=("Segoe UI", 16, "bold"))
-        style.configure("Hint.TLabel", background=BG, foreground=TEXT2, font=("Segoe UI", 10))
+        style.configure('Nav.TButton', font=('Segoe UI', 10, 'bold'), padding=(12, 10), foreground=TEXT, background=WHITE, borderwidth=1, relief='solid', anchor='w')
+        style.map('Nav.TButton', background=[('active', '#F4F7FA'), ('pressed', '#E7EEF5')])
+        style.configure('NavActive.TButton', font=('Segoe UI', 10, 'bold'), padding=(12, 10), foreground=BLUE, background='#EAF1F8', borderwidth=1, relief='solid', anchor='w')
+        style.map('NavActive.TButton', background=[('active', '#EAF1F8'), ('pressed', '#EAF1F8')])
+        style.configure('Card.TFrame', background=WHITE)
+        style.configure('CardTitle.TLabel', background=WHITE, foreground=TEXT, font=('Segoe UI', 12, 'bold'))
+        style.configure('CardBody.TLabel', background=WHITE, foreground=TEXT2, font=('Segoe UI', 10))
+        style.configure('Section.TLabel', background=BG, foreground=TEXT, font=('Segoe UI', 16, 'bold'))
+        style.configure('Hint.TLabel', background=BG, foreground=TEXT2, font=('Segoe UI', 10))
 
     def _build_layout(self) -> None:
         self.grid_rowconfigure(1, weight=1)
@@ -977,191 +1280,160 @@ class FinanceMateApp(tk.Tk):
 
     def _build_header(self) -> None:
         self.header_frame = tk.Frame(self, bg=HEADER, height=HEADER_HEIGHT, highlightthickness=1, highlightbackground=LINE)
-        self.header_frame.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        self.header_frame.grid(row=0, column=0, columnspan=2, sticky='nsew')
         self.header_frame.grid_propagate(False)
         self.header_frame.grid_columnconfigure(0, weight=1)
         self.header_frame.grid_columnconfigure(1, weight=0)
 
         title_wrap = tk.Frame(self.header_frame, bg=HEADER)
-        title_wrap.grid(row=0, column=0, sticky="w", padx=18)
-        tk.Label(title_wrap, text=APP_NAME, bg=HEADER, fg=BLUE, font=("Segoe UI", 24, "bold")).pack(anchor="w")
-        tk.Label(
-            title_wrap,
-            text="Startarchitektur v0.1 – Desktop, Fullscreen, Journalbuchung aktiv",
-            bg=HEADER,
-            fg=TEXT2,
-            font=("Segoe UI", 10),
-        ).pack(anchor="w")
+        title_wrap.grid(row=0, column=0, sticky='w', padx=18)
+        tk.Label(title_wrap, text=APP_NAME, bg=HEADER, fg=BLUE, font=('Segoe UI', 24, 'bold')).pack(anchor='w')
+        tk.Label(title_wrap, text='Startarchitektur v0.1 – Desktop, Fullscreen, Debitoren-Block aktiv', bg=HEADER, fg=TEXT2, font=('Segoe UI', 10)).pack(anchor='w')
 
         widget_bar = tk.Frame(self.header_frame, bg=HEADER)
-        widget_bar.grid(row=0, column=1, sticky="e", padx=(10, 18))
-        self._mini_widget(widget_bar, "Änderung vorschlagen").pack(side="left", padx=(0, 8), pady=18)
-        self._mini_widget(widget_bar, "[i] Hilfe").pack(side="left", pady=18)
+        widget_bar.grid(row=0, column=1, sticky='e', padx=(10, 18))
+        self._mini_widget(widget_bar, 'Änderung vorschlagen').pack(side='left', padx=(0, 8), pady=18)
+        self._mini_widget(widget_bar, '[i] Hilfe').pack(side='left', pady=18)
 
     def _mini_widget(self, parent: tk.Widget, text: str) -> tk.Label:
-        return tk.Label(
-            parent,
-            text=text,
-            bg=WHITE,
-            fg=TEXT,
-            font=("Segoe UI", 9, "bold"),
-            padx=10,
-            pady=5,
-            relief="solid",
-            bd=1,
-            highlightthickness=0,
-        )
+        return tk.Label(parent, text=text, bg=WHITE, fg=TEXT, font=('Segoe UI', 9, 'bold'), padx=10, pady=5, relief='solid', bd=1, highlightthickness=0)
 
     def _build_sidebar(self) -> None:
         self.sidebar_frame = tk.Frame(self, bg=BG, width=SIDEBAR_WIDTH, highlightthickness=1, highlightbackground=LINE)
-        self.sidebar_frame.grid(row=1, column=0, sticky="nsew")
+        self.sidebar_frame.grid(row=1, column=0, sticky='nsew')
         self.sidebar_frame.grid_propagate(False)
 
-        tk.Label(self.sidebar_frame, text="Module", bg=BG, fg=TEXT, font=("Segoe UI", 14, "bold")).pack(anchor="w", padx=18, pady=(18, 10))
-        tk.Label(self.sidebar_frame, text="Finance-Mate-Startnavigation", bg=BG, fg=TEXT2, font=("Segoe UI", 9)).pack(anchor="w", padx=18, pady=(0, 12))
+        tk.Label(self.sidebar_frame, text='Module', bg=BG, fg=TEXT, font=('Segoe UI', 14, 'bold')).pack(anchor='w', padx=18, pady=(18, 10))
+        tk.Label(self.sidebar_frame, text='Finance-Mate-Startnavigation', bg=BG, fg=TEXT2, font=('Segoe UI', 9)).pack(anchor='w', padx=18, pady=(0, 12))
 
         for module_name in self.nav_order:
-            btn = ttk.Button(
-                self.sidebar_frame,
-                text=module_name,
-                style="Nav.TButton",
-                command=lambda value=module_name: self.show_module(value),
-            )
-            btn.pack(fill="x", padx=14, pady=4)
+            btn = ttk.Button(self.sidebar_frame, text=module_name, style='Nav.TButton', command=lambda value=module_name: self.show_module(value))
+            btn.pack(fill='x', padx=14, pady=4)
             self.nav_buttons[module_name] = btn
 
     def _build_workspace(self) -> None:
         self.workspace_frame = tk.Frame(self, bg=BG)
-        self.workspace_frame.grid(row=1, column=1, sticky="nsew")
+        self.workspace_frame.grid(row=1, column=1, sticky='nsew')
         self.workspace_frame.grid_rowconfigure(1, weight=1)
         self.workspace_frame.grid_columnconfigure(0, weight=1)
 
         self.path_bar = tk.Frame(self.workspace_frame, bg=BG)
-        self.path_bar.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 6))
-        self.path_label = tk.Label(self.path_bar, text="Finance Mate  >  Dashboard", bg=BG, fg=TEXT2, font=("Segoe UI", 9))
-        self.path_label.pack(anchor="w")
+        self.path_bar.grid(row=0, column=0, sticky='ew', padx=18, pady=(14, 6))
+        self.path_label = tk.Label(self.path_bar, text='Finance Mate  >  Dashboard', bg=BG, fg=TEXT2, font=('Segoe UI', 9))
+        self.path_label.pack(anchor='w')
 
         self.content_frame = tk.Frame(self.workspace_frame, bg=BG)
-        self.content_frame.grid(row=1, column=0, sticky="nsew", padx=18, pady=(6, 12))
+        self.content_frame.grid(row=1, column=0, sticky='nsew', padx=18, pady=(6, 12))
         self.content_frame.grid_rowconfigure(0, weight=1)
         self.content_frame.grid_columnconfigure(0, weight=1)
 
     def _build_footer(self) -> None:
         self.footer_frame = tk.Frame(self, bg=HEADER, height=FOOTER_HEIGHT, highlightthickness=1, highlightbackground=LINE)
-        self.footer_frame.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        self.footer_frame.grid(row=2, column=0, columnspan=2, sticky='nsew')
         self.footer_frame.grid_propagate(False)
-
-        self.status_label = tk.Label(
-            self.footer_frame,
-            text=f"{APP_NAME} {APP_VERSION}  |  Datenbank: SQLite  |  Fullscreen aktiv",
-            bg=HEADER,
-            fg=TEXT2,
-            font=("Segoe UI", 8),
-        )
-        self.status_label.pack(side="left", padx=14)
+        self.status_label = tk.Label(self.footer_frame, text=f'{APP_NAME} {APP_VERSION}  |  Datenbank: SQLite  |  Fullscreen aktiv', bg=HEADER, fg=TEXT2, font=('Segoe UI', 8))
+        self.status_label.pack(side='left', padx=14)
 
     def set_status(self, text: str) -> None:
-        self.status_label.config(text=f"{APP_NAME} {APP_VERSION}  |  {text}")
+        self.status_label.config(text=f'{APP_NAME} {APP_VERSION}  |  {text}')
 
     def show_module(self, module_name: str) -> None:
         self.active_module.set(module_name)
-        self.path_label.config(text=f"Finance Mate  >  {module_name}")
-        self.set_status(f"Modul: {module_name}  |  Datenbank: SQLite")
+        self.path_label.config(text=f'Finance Mate  >  {module_name}')
+        self.set_status(f'Modul: {module_name}  |  Datenbank: SQLite')
 
         for name, button in self.nav_buttons.items():
-            button.configure(style="NavActive.TButton" if name == module_name else "Nav.TButton")
+            button.configure(style='NavActive.TButton' if name == module_name else 'Nav.TButton')
 
         for child in self.content_frame.winfo_children():
             child.destroy()
 
         render_map = {
-            "Dashboard": self._render_dashboard,
-            "Stammdaten": self._render_stammdaten,
-            "Finanzbuchhaltung": self._render_finanzbuchhaltung,
-            "Debitoren": self._render_debitoren,
-            "Kreditoren": self._render_kreditoren,
-            "Zahlungen": self._render_zahlungen,
-            "Reporting": self._render_reporting,
-            "Audit": self._render_audit,
-            "Einstellungen": self._render_einstellungen,
+            'Dashboard': self._render_dashboard,
+            'Stammdaten': self._render_stammdaten,
+            'Finanzbuchhaltung': self._render_finanzbuchhaltung,
+            'Debitoren': self._render_debitoren,
+            'Kreditoren': self._render_kreditoren,
+            'Zahlungen': self._render_zahlungen,
+            'Reporting': self._render_reporting,
+            'Audit': self._render_audit,
+            'Einstellungen': self._render_einstellungen,
         }
         render_map.get(module_name, self._render_dashboard)()
 
     def _render_dashboard(self) -> None:
         wrapper = self._create_two_by_two_grid()
-        self._card(wrapper, 0, 0, "Systemstart", "Finance Mate startet maximiert und initialisiert SQLite automatisch.")
-        self._card(wrapper, 0, 1, "Block 4 aktiv", "Journalbuchungen sind jetzt mit Belegkopf, Buchungszeilen und Soll/Haben-Prüfung umgesetzt.")
-        self._card(wrapper, 1, 0, "Nächste Coding-Blöcke", "1) Debitoren-/Kreditorenlogik\n2) Zahlungen\n3) Reporting\n4) Audit")
-        self._card(wrapper, 1, 1, "Projektstatus", "Stammdaten und Finanzbuchhaltung sind jetzt in SQLite persistiert und bilden die Kernbasis für weitere Prozesse.")
+        self._card(wrapper, 0, 0, 'Systemstart', 'Finance Mate startet maximiert und initialisiert SQLite automatisch.')
+        self._card(wrapper, 0, 1, 'Block 5 aktiv', 'Debitorenrechnungen und offene Posten sind jetzt als eigener Entwicklungsblock umgesetzt.')
+        self._card(wrapper, 1, 0, 'Fine-Tuning geplant', 'Ja: Umbenennungen, Bearbeitung von Stammdaten, Feldoptimierungen, Validierungs-Finishing, Such-/Filter-Finetuning und UI-Konsistenz werden als projektweite Optimierungsphase eingeplant.')
+        self._card(wrapper, 1, 1, 'Nächste Coding-Blöcke', '1) Kreditorenlogik\n2) Zahlungen\n3) Reporting\n4) Audit/Fine-Tuning-Phase')
 
     def _render_stammdaten(self) -> None:
         view = StammdatenView(self.content_frame, self.set_status)
-        view.grid(row=0, column=0, sticky="nsew")
+        view.grid(row=0, column=0, sticky='nsew')
 
     def _render_finanzbuchhaltung(self) -> None:
         view = JournalView(self.content_frame, self.set_status)
-        view.grid(row=0, column=0, sticky="nsew")
+        view.grid(row=0, column=0, sticky='nsew')
 
     def _render_debitoren(self) -> None:
-        frame = self._create_single_area("Debitoren", "Nächster Block: Ausgangsrechnungen, offene Posten, Zahlungseingänge und Ausgleich.")
-        self._list_block(frame, ["Ausgangsrechnungen", "Offene Posten", "Zahlungseingänge", "Teilzahlungen", "Mahnstatus-Basis"])
+        view = DebitorsView(self.content_frame, self.set_status)
+        view.grid(row=0, column=0, sticky='nsew')
 
     def _render_kreditoren(self) -> None:
-        frame = self._create_single_area("Kreditoren", "Nächster Block: Eingangsrechnungen, Fälligkeiten, Zahlungen und Ausgleich.")
-        self._list_block(frame, ["Eingangsrechnungen", "Offene Posten", "Fälligkeitsübersicht", "Zahlungsausgang", "Ausgleich"])
+        frame = self._create_single_area('Kreditoren', 'Naechster Block: Eingangsrechnungen, offene Posten, Faelligkeiten und spaeterer Ausgleich.')
+        self._list_block(frame, ['Eingangsrechnungen', 'Offene Posten', 'Faelligkeitsuebersicht', 'Zahlungsausgang', 'Ausgleich'])
 
     def _render_zahlungen(self) -> None:
-        frame = self._create_single_area("Zahlungen", "Für v0.1 zunächst schlank: manuelle Zahlungsbuchung, Zuordnung zu offenen Posten und einfache Kontenabstimmung.")
-        self._list_block(frame, ["Bankkonten", "Manuelle Zahlungen", "OP-Zuordnung", "Kontenabstimmung", "später: Bankimport / PostgreSQL-Betrieb"])
+        frame = self._create_single_area('Zahlungen', 'Fuer v0.1 zunaechst schlank: manuelle Zahlungsbuchung, OP-Zuordnung und spaeter Kontenabstimmung.')
+        self._list_block(frame, ['Bankkonten', 'Manuelle Zahlungen', 'OP-Zuordnung', 'Kontenabstimmung', 'spaeter: Bankimport / PostgreSQL-Betrieb'])
 
     def _render_reporting(self) -> None:
-        frame = self._create_single_area("Reporting", "Die ersten Standardberichte werden auf diesem Bereich aufsetzen.")
-        self._list_block(frame, ["Saldenliste", "Kontoblatt", "OP-Liste Debitoren", "OP-Liste Kreditoren", "Fälligkeitsreport", "Buchungsjournal"])
+        frame = self._create_single_area('Reporting', 'Die ersten Standardberichte bauen spaeter auf Journal, Debitoren und Kreditoren auf.')
+        self._list_block(frame, ['Saldenliste', 'Kontoblatt', 'OP-Liste Debitoren', 'OP-Liste Kreditoren', 'Faelligkeitsreport', 'Buchungsjournal'])
 
     def _render_audit(self) -> None:
-        frame = self._create_single_area("Audit", "Von Anfang an vorgesehen: Nachvollziehbarkeit von Änderungen, Statuswechseln und späteren Freigaben.")
-        self._list_block(frame, ["Änderungsprotokoll", "Benutzerhistorie", "Statuswechsel", "Freigabeverlauf (später)"])
+        frame = self._create_single_area('Audit', 'Von Anfang an vorgesehen: Nachvollziehbarkeit von Aenderungen, Statuswechseln und spaeteren Freigaben.')
+        self._list_block(frame, ['Aenderungsprotokoll', 'Benutzerhistorie', 'Statuswechsel', 'Freigabeverlauf (spaeter)', 'projektweites Fine-Tuning'])
 
     def _render_einstellungen(self) -> None:
-        frame = self._create_single_area("Einstellungen", "Grundkonfiguration für Finance Mate – Start mit SQLite, später vorbereitet für PostgreSQL.")
-        self._list_block(frame, ["Mandant/Firma (Single-Company Start)", "Systemparameter", "Nummernkreise", "Datenbankmodus: SQLite", "später: PostgreSQL-Umschaltung"])
+        frame = self._create_single_area('Einstellungen', 'Grundkonfiguration fuer Finance Mate – Start mit SQLite, spaeter vorbereitet fuer PostgreSQL.')
+        self._list_block(frame, ['Mandant/Firma (Single-Company Start)', 'Systemparameter', 'Nummernkreise', 'Datenbankmodus: SQLite', 'spaeter: PostgreSQL-Umschaltung'])
 
     def _create_two_by_two_grid(self) -> tk.Frame:
         wrapper = tk.Frame(self.content_frame, bg=BG)
-        wrapper.grid(row=0, column=0, sticky="nsew")
+        wrapper.grid(row=0, column=0, sticky='nsew')
         for idx in range(2):
-            wrapper.grid_columnconfigure(idx, weight=1, uniform="cards")
-            wrapper.grid_rowconfigure(idx, weight=1, uniform="cards")
+            wrapper.grid_columnconfigure(idx, weight=1, uniform='cards')
+            wrapper.grid_rowconfigure(idx, weight=1, uniform='cards')
         return wrapper
 
     def _create_single_area(self, title: str, text: str) -> tk.Frame:
         wrapper = tk.Frame(self.content_frame, bg=BG)
-        wrapper.grid(row=0, column=0, sticky="nsew")
+        wrapper.grid(row=0, column=0, sticky='nsew')
         wrapper.grid_columnconfigure(0, weight=1)
-
-        ttk.Label(wrapper, text=title, style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        ttk.Label(wrapper, text=text, style="Hint.TLabel", wraplength=900, justify="left").grid(row=1, column=0, sticky="w", pady=(0, 12))
+        ttk.Label(wrapper, text=title, style='Section.TLabel').grid(row=0, column=0, sticky='w', pady=(0, 8))
+        ttk.Label(wrapper, text=text, style='Hint.TLabel', wraplength=900, justify='left').grid(row=1, column=0, sticky='w', pady=(0, 12))
         return wrapper
 
     def _list_block(self, parent: tk.Frame, items: list[str]) -> None:
         outer = tk.Frame(parent, bg=CARD_BORDER)
-        outer.grid(row=2, column=0, sticky="nsew")
+        outer.grid(row=2, column=0, sticky='nsew')
         body = tk.Frame(outer, bg=WHITE)
-        body.pack(fill="both", expand=True, padx=1, pady=1)
-
+        body.pack(fill='both', expand=True, padx=1, pady=1)
         for idx, item in enumerate(items):
             row = tk.Frame(body, bg=WHITE)
-            row.pack(fill="x", padx=16, pady=(12 if idx == 0 else 6, 0))
-            tk.Label(row, text="•", bg=WHITE, fg=BLUE, font=("Segoe UI", 11, "bold")).pack(side="left")
-            tk.Label(row, text=item, bg=WHITE, fg=TEXT, font=("Segoe UI", 10)).pack(side="left", padx=(8, 0))
+            row.pack(fill='x', padx=16, pady=(12 if idx == 0 else 6, 0))
+            tk.Label(row, text='•', bg=WHITE, fg=BLUE, font=('Segoe UI', 11, 'bold')).pack(side='left')
+            tk.Label(row, text=item, bg=WHITE, fg=TEXT, font=('Segoe UI', 10)).pack(side='left', padx=(8, 0))
 
     def _card(self, parent: tk.Widget, row: int, column: int, title: str, body: str) -> None:
         outer = tk.Frame(parent, bg=CARD_BORDER, bd=0, highlightthickness=0)
-        outer.grid(row=row, column=column, sticky="nsew", padx=8, pady=8)
-        inner = ttk.Frame(outer, style="Card.TFrame", padding=16)
-        inner.pack(fill="both", expand=True, padx=1, pady=1)
-        ttk.Label(inner, text=title, style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(inner, text=body, style="CardBody.TLabel", wraplength=420, justify="left").pack(anchor="w", pady=(8, 0))
+        outer.grid(row=row, column=column, sticky='nsew', padx=8, pady=8)
+        inner = ttk.Frame(outer, style='Card.TFrame', padding=16)
+        inner.pack(fill='both', expand=True, padx=1, pady=1)
+        ttk.Label(inner, text=title, style='CardTitle.TLabel').pack(anchor='w')
+        ttk.Label(inner, text=body, style='CardBody.TLabel', wraplength=420, justify='left').pack(anchor='w', pady=(8, 0))
 
 
 def main() -> None:
@@ -1171,5 +1443,5 @@ def main() -> None:
     app.mainloop()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
