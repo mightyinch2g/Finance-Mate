@@ -2649,6 +2649,671 @@ class CreditorsView(InvoiceModuleBase):
             messagebox.showerror(APP_NAME, f"Rechnung konnte nicht gespeichert werden:\n{exc}")
 
 
+
+# === FINANCE MATE PATCH V0_6_3 ===
+APP_VERSION = "0.6.3"
+STANDARD_RIGHT_BLOCK_MIN = 520
+STANDARD_LEFT_BLOCK_MIN = 760
+
+# PDF-Preview optional via PyMuPDF
+try:
+    import fitz  # PyMuPDF
+    FITZ_AVAILABLE = True
+except Exception:
+    FITZ_AVAILABLE = False
+
+
+def _safe_center_parent_geometry(parent: tk.Widget, w: int, h: int) -> str:
+    try:
+        parent.update_idletasks()
+        px = parent.winfo_rootx() + max(20, (parent.winfo_width() - w) // 2)
+        py = parent.winfo_rooty() + max(20, (parent.winfo_height() - h) // 2)
+        return f"{w}x{h}+{px}+{py}"
+    except Exception:
+        return f"{w}x{h}"
+
+
+def _create_progress_popup(parent: tk.Widget, title: str, maximum: int):
+    popup = tk.Toplevel(parent)
+    popup.title(title)
+    popup.geometry(_safe_center_parent_geometry(parent, 520, 140))
+    popup.resizable(False, False)
+    popup.transient(parent)
+    popup.grab_set()
+    popup.configure(bg=WHITE)
+    tk.Label(popup, text=title, bg=WHITE, fg=TEXT, font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
+    info = tk.Label(popup, text="Vorbereitung...", bg=WHITE, fg=TEXT2, font=("Segoe UI", 9), anchor="w")
+    info.pack(fill="x", padx=16)
+    progress = ttk.Progressbar(popup, orient="horizontal", mode="determinate", maximum=max(1, maximum))
+    progress.pack(fill="x", padx=16, pady=(12, 16))
+    popup.update_idletasks()
+    return popup, info, progress
+
+
+def _close_progress_popup(popup: tk.Toplevel) -> None:
+    try:
+        popup.grab_release()
+    except Exception:
+        pass
+    try:
+        popup.destroy()
+    except Exception:
+        pass
+
+
+def build_preview_photo(file_path: str, size=(680, 420)):
+    if not PIL_AVAILABLE:
+        return None
+    try:
+        ext = Path(file_path).suffix.lower()
+        # echte Bildvorschau
+        if ext in {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tif', '.tiff'}:
+            img = Image.open(file_path).convert('RGB')
+            img.thumbnail(size)
+            canvas = Image.new('RGB', size, 'white')
+            x = (size[0] - img.width) // 2
+            y = (size[1] - img.height) // 2
+            canvas.paste(img, (x, y))
+            return ImageTk.PhotoImage(canvas)
+        # echte PDF-Vorschau über erste Seite rendern
+        if ext == '.pdf' and FITZ_AVAILABLE:
+            doc = fitz.open(file_path)
+            if len(doc) > 0:
+                page = doc.load_page(0)
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.4, 1.4), alpha=False)
+                mode = 'RGB'
+                img = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+                img.thumbnail(size)
+                canvas = Image.new('RGB', size, 'white')
+                x = (size[0] - img.width) // 2
+                y = (size[1] - img.height) // 2
+                canvas.paste(img, (x, y))
+                return ImageTk.PhotoImage(canvas)
+        # Excel/CSV/TXT/DOCX als visuelle Dokumentkarte (keine reine Fehlermeldung)
+        preview_lines = []
+        title = clean_document_title(file_path)
+        if ext in {'.txt', '.csv'}:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as fh:
+                preview_lines = [line.rstrip() for _, line in zip(range(18), fh)]
+        elif ext in {'.xlsx', '.xlsm'}:
+            try:
+                from openpyxl import load_workbook
+                wb = load_workbook(file_path, read_only=True, data_only=True)
+                ws = wb[wb.sheetnames[0]]
+                for ridx, row in enumerate(ws.iter_rows(values_only=True)):
+                    vals = [str(v) for v in row[:6] if v not in (None, '')]
+                    if vals:
+                        preview_lines.append(' | '.join(vals))
+                    if ridx >= 17:
+                        break
+            except Exception:
+                preview_lines = ['Excel-Vorschau konnte nicht vollständig gerendert werden.']
+        elif ext == '.docx':
+            try:
+                import docx
+                doc = docx.Document(file_path)
+                preview_lines = [par.text for par in doc.paragraphs if par.text.strip()][:18]
+            except Exception:
+                preview_lines = ['DOCX-Vorschau konnte nicht vollständig gerendert werden.']
+        else:
+            preview_lines = [f'Dateityp {ext or "unbekannt"}', 'Für diesen Typ ist aktuell keine echte Pixelvorschau vorhanden.']
+
+        from PIL import ImageDraw, ImageFont
+        canvas = Image.new('RGB', size, 'white')
+        draw = ImageDraw.Draw(canvas)
+        font = ImageFont.load_default()
+        draw.rectangle((0, 0, size[0], 44), fill='#EAF1F8')
+        draw.text((12, 14), title[:90], fill='#004B93', font=font)
+        y = 58
+        draw.rectangle((10, 54, size[0]-10, size[1]-10), outline='#B7C6D5', width=1)
+        for line in preview_lines[:20]:
+            draw.text((22, y), line[:110], fill='#182431', font=font)
+            y += 17
+            if y > size[1] - 28:
+                break
+        return ImageTk.PhotoImage(canvas)
+    except Exception:
+        return None
+
+
+def iter_supported_files_from_folder(folder: str) -> List[str]:
+    paths: List[str] = []
+    try:
+        for root, _dirs, files in os.walk(folder):
+            for name in files:
+                fp = str(Path(root) / name)
+                if Path(fp).suffix.lower() in SUPPORTED_ARCHIVE_EXTENSIONS:
+                    paths.append(fp)
+    except Exception:
+        pass
+    return sorted(paths)
+
+
+def _patched_stammdaten_build_tab_v063(self, tab_name: str, parent: tk.Frame) -> None:
+    parent.grid_rowconfigure(1, weight=1)
+    parent.grid_columnconfigure(0, weight=2)
+    parent.grid_columnconfigure(1, weight=1)
+    toolbar = tk.Frame(parent, bg=WHITE)
+    toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 10))
+    toolbar.grid_columnconfigure(1, weight=1)
+    tk.Label(toolbar, text=f"{tab_name} verwalten", bg=WHITE, fg=TEXT, font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w")
+    search_var = tk.StringVar()
+    self.search_vars[tab_name] = search_var
+    search_entry = ttk.Entry(toolbar, textvariable=search_var)
+    search_entry.grid(row=0, column=1, sticky="e", padx=(16, 6))
+    search_entry.bind("<KeyRelease>", lambda _event, name=tab_name: self.load_table_data(name))
+    ttk.Button(toolbar, text="Aktualisieren", style="Confirm.TButton", command=lambda name=tab_name: self.load_table_data(name)).grid(row=0, column=2, sticky="e")
+
+    left = tk.Frame(parent, bg=WHITE)
+    left.grid(row=1, column=0, sticky="nsew", padx=(8, 12), pady=(0, 8))
+    left.grid_rowconfigure(0, weight=1)
+    left.grid_columnconfigure(0, weight=1)
+    right = tk.Frame(parent, bg=WHITE)
+    right.grid(row=1, column=1, sticky="nsew", padx=(0, 8), pady=(0, 8))
+    right.grid_rowconfigure(0, weight=1)
+    right.grid_columnconfigure(0, weight=1)
+
+    tree = self._create_treeview(left, tab_name)
+    self.trees[tab_name] = tree
+    tree.bind("<<TreeviewSelect>>", lambda _event, name=tab_name: self.load_selected_record(name))
+    self.setup_sorting(tree)
+
+    form_outer = tk.Frame(right, bg=CARD_BORDER)
+    form_outer.grid(row=0, column=0, sticky="nsew")
+    form_scroll = ScrollableFrame(form_outer)
+    form_scroll.pack(fill="both", expand=True, padx=1, pady=1)
+    # deutliche sichtbare Scrollhöhe für alle Tab-Formulare, insbesondere Debitoren/Kreditoren
+    form_scroll.canvas.configure(height=470)
+    form_body = form_scroll.content
+
+    tk.Label(form_body, text="Eintrag anlegen / bearbeiten", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
+    mode_label = tk.Label(form_body, text="Modus: Neuer Eintrag", bg=WHITE, fg=TEXT2, font=("Segoe UI", 9), wraplength=320, justify="left")
+    mode_label.pack(anchor="w", padx=16, pady=(0, 12))
+    self.mode_labels[tab_name] = mode_label
+
+    field_widgets: Dict[str, tk.Widget] = {}
+    for field_key, label_text, field_type, *rest in self.tab_configs[tab_name]["form_fields"]:
+        row = tk.Frame(form_body, bg=WHITE)
+        row.pack(fill="x", padx=16, pady=5)
+        tk.Label(row, text=label_text, bg=WHITE, fg=TEXT, font=("Segoe UI", 9, "bold"), anchor="w").pack(side="top", anchor="w")
+        if field_type == "combo":
+            values = rest[0] if rest else []
+            widget = ttk.Combobox(row, values=values, state="readonly")
+            if field_key == "country_code":
+                widget.set("DE")
+            elif values:
+                widget.set(values[0])
+        else:
+            widget = ttk.Entry(row)
+        widget.pack(fill="x", pady=(4, 0))
+        field_widgets[field_key] = widget
+
+    ttk.Label(form_body, text="* = Pflichtfeld. Alle anderen Felder sind optional.", style="Hint.TLabel", wraplength=320, justify="left").pack(anchor="w", padx=16, pady=(8, 8))
+    button_row = tk.Frame(form_body, bg=WHITE)
+    button_row.pack(fill="x", padx=16, pady=(8, 16))
+    ttk.Button(button_row, text="Speichern / Aktualisieren", style="Confirm.TButton", command=lambda name=tab_name: self.save_record(name)).pack(side="left")
+    ttk.Button(button_row, text="Felder leeren", command=lambda name=tab_name: self.clear_form(name)).pack(side="left", padx=(8, 0))
+    self.forms[tab_name] = field_widgets
+
+StammdatenView._build_tab = _patched_stammdaten_build_tab_v063
+
+
+def _patched_creditors_build_ui_v063(self) -> None:
+    self.grid_rowconfigure(2, weight=1)
+    self.grid_columnconfigure(0, weight=1)
+    ttk.Label(self, text=self.invoice_title, style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
+    ttk.Label(self, text=self.block_hint, style="Hint.TLabel", wraplength=1050, justify="left").grid(row=1, column=0, sticky="w", pady=(0, 12))
+
+    shell = tk.Frame(self, bg=BG)
+    shell.grid(row=2, column=0, sticky="nsew")
+    shell.grid_rowconfigure(0, weight=1)
+    shell.grid_columnconfigure(0, weight=STANDARD_BLOCK_LEFT_WEIGHT, minsize=STANDARD_LEFT_BLOCK_MIN)
+    shell.grid_columnconfigure(1, weight=STANDARD_BLOCK_RIGHT_WEIGHT, minsize=STANDARD_RIGHT_BLOCK_MIN)
+
+    left_outer = tk.Frame(shell, bg=CARD_BORDER)
+    left_outer.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    left = tk.Frame(left_outer, bg=WHITE)
+    left.pack(fill="both", expand=True, padx=1, pady=1)
+    left.grid_columnconfigure(0, weight=1)
+    left.grid_rowconfigure(3, weight=1)
+    left.grid_rowconfigure(5, weight=1)
+
+    right_outer = tk.Frame(shell, bg=CARD_BORDER, width=STANDARD_RIGHT_BLOCK_MIN)
+    right_outer.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+    right_outer.grid_propagate(False)
+    right = tk.Frame(right_outer, bg=WHITE)
+    right.pack(fill="both", expand=True, padx=1, pady=1)
+    right.grid_columnconfigure(0, weight=1)
+    right.grid_rowconfigure(0, weight=1)
+
+    # Block 1 Formular
+    form_outer = tk.Frame(left, bg=CARD_BORDER)
+    form_outer.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+    form_scroll = ScrollableFrame(form_outer)
+    form_scroll.pack(fill="both", expand=True, padx=1, pady=1)
+    form_scroll.canvas.configure(height=190)
+    form = form_scroll.content
+    for idx in range(5):
+        form.grid_columnconfigure(idx, weight=1)
+
+    self.invoice_no_var = tk.StringVar(value=generate_number('vendor_invoice_counter', 'AP-'))
+    self.invoice_date_var = tk.StringVar(value=datetime.now().strftime(DATE_FMT))
+    self.posting_text_var = tk.StringVar()
+    self.amount_var = tk.StringVar()
+    self.due_date_var = tk.StringVar(value=datetime.now().strftime(DATE_FMT))
+    self.partner_var = tk.StringVar(value=self.partner_choices[0] if self.partner_choices else "")
+    self.payment_term_var = tk.StringVar(value=self.payment_term_choices[0] if self.payment_term_choices else "")
+    self.tax_code_var = tk.StringVar(value=self.tax_code_choices[0] if self.tax_code_choices else "")
+
+    self._labeled_entry(form, 0, 0, "Rechnungsnummer", self.invoice_no_var)
+    self._labeled_entry(form, 0, 1, "Rechnungsdatum", self.invoice_date_var)
+    self._labeled_entry(form, 0, 2, "Fälligkeitsdatum", self.due_date_var)
+
+    # Kreditor mit kleinem Plus-Button
+    partner_box = tk.Frame(form, bg=WHITE)
+    partner_box.grid(row=0, column=3, columnspan=2, sticky="ew", padx=12, pady=4)
+    tk.Label(partner_box, text=self.partner_label, bg=WHITE, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+    partner_row = tk.Frame(partner_box, bg=WHITE)
+    partner_row.pack(fill="x", pady=(4, 0))
+    combo = ttk.Combobox(partner_row, textvariable=self.partner_var, values=self.partner_choices, state='readonly', width=38)
+    combo.pack(side="left", fill="x", expand=True)
+    if self.partner_choices and not self.partner_var.get():
+        combo.set(self.partner_choices[0])
+    tk.Button(partner_row, text="+", width=3, bg=WHITE, fg=BLUE, relief="solid", bd=1, command=self.open_vendor_quick_popup).pack(side="left", padx=(6, 0))
+
+    self._labeled_combo(form, 1, 0, "Zahlungsbedingung", self.payment_term_var, self.payment_term_choices, width=42)
+    self._labeled_combo(form, 1, 1, "Steuerkennzeichen", self.tax_code_var, self.tax_code_choices, width=42)
+    self._labeled_entry(form, 1, 2, "Betrag", self.amount_var)
+    self._labeled_entry(form, 1, 3, "Buchungstext", self.posting_text_var)
+
+    action_row = tk.Frame(left, bg=WHITE)
+    action_row.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
+    self.attach_icon = load_button_icon(ATTACH_BUTTON_ICON_PATH)
+    attach_btn = ttk.Button(action_row, text="Rechnungsbeleg hinzufügen", style="Confirm.TButton", command=self.add_pending_attachments)
+    if self.attach_icon is not None:
+        attach_btn.configure(image=self.attach_icon, compound="left")
+    attach_btn.pack(side="left")
+    # grauer Button mit manueller Zeilenumbruch-Optik, gleiche Größe
+    gray_btn = tk.Button(action_row, text="Fälligkeit nach Zahlungs-\nbedingung berechnen", bg="#E6E6E6", fg=TEXT, relief="solid", bd=1, width=24, height=2, command=self.apply_payment_term)
+    gray_btn.pack(side="left", padx=(8, 0))
+    ttk.Button(action_row, text="Rechnung speichern", style="Confirm.TButton", command=self.save_invoice).pack(side="left", padx=(8, 0))
+    ttk.Button(action_row, text="Felder leeren", command=self.clear_form).pack(side="left", padx=(8, 0))
+
+    tk.Label(left, text="Eingangsrechnungen (alle Status)", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 8))
+    inv_outer = tk.Frame(left, bg=CARD_BORDER)
+    inv_outer.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 12))
+    inv_inner = tk.Frame(inv_outer, bg=WHITE)
+    inv_inner.pack(fill="both", expand=True, padx=1, pady=1)
+    inv_inner.grid_rowconfigure(0, weight=1)
+    inv_inner.grid_columnconfigure(0, weight=1)
+    self.invoice_tree = ttk.Treeview(inv_inner, columns=("reference_no", "partner_name", "invoice_date", "due_date", "posting_text", "amount", "status", "attachments"), show="headings")
+    self.invoice_tree.grid(row=0, column=0, sticky="nsew")
+    inv_scroll = ttk.Scrollbar(inv_inner, orient="vertical", command=self.invoice_tree.yview)
+    inv_scroll.grid(row=0, column=1, sticky="ns")
+    self.invoice_tree.configure(yscrollcommand=inv_scroll.set)
+    for key, title, width in [("reference_no", "Referenz", 100), ("partner_name", self.partner_label, 145), ("invoice_date", "Datum", 78), ("due_date", "Fälligkeit", 92), ("posting_text", "Buchungstext", 155), ("amount", "Re.-Betrag", 82), ("status", "Status", 85), ("attachments", "Belege", 160)]:
+        self.invoice_tree.heading(key, text=title)
+        self.invoice_tree.column(key, width=width, anchor="w", stretch=False)
+    self.setup_sorting(self.invoice_tree)
+    configure_tree_tags(self.invoice_tree)
+    self.invoice_tree.bind("<Button-3>", self._show_invoice_context_menu)
+    self.invoice_tree.bind("<Button-1>", self._on_invoice_click)
+
+    tk.Label(left, text="Offene Posten Kreditoren", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).grid(row=4, column=0, sticky="w", padx=16, pady=(0, 8))
+    op_outer = tk.Frame(left, bg=CARD_BORDER)
+    op_outer.grid(row=5, column=0, sticky="nsew", padx=16, pady=(0, 16))
+    op_inner = tk.Frame(op_outer, bg=WHITE)
+    op_inner.pack(fill="both", expand=True, padx=1, pady=1)
+    op_inner.grid_rowconfigure(0, weight=1)
+    op_inner.grid_columnconfigure(0, weight=1)
+    self.open_item_tree = ttk.Treeview(op_inner, columns=("reference_no", "partner_name", "invoice_date", "due_date", "amount", "open_amount", "attachments", "status"), show="headings")
+    self.open_item_tree.grid(row=0, column=0, sticky="nsew")
+    op_scroll = ttk.Scrollbar(op_inner, orient="vertical", command=self.open_item_tree.yview)
+    op_scroll.grid(row=0, column=1, sticky="ns")
+    self.open_item_tree.configure(yscrollcommand=op_scroll.set)
+    for key, title, width in [("reference_no", "Referenz", 90), ("partner_name", self.partner_label, 135), ("invoice_date", "Datum", 72), ("due_date", "Fälligkeit", 88), ("amount", "Betrag", 74), ("open_amount", "Betrag offen", 88), ("attachments", "Belege", 120), ("status", "Status", 82)]:
+        self.open_item_tree.heading(key, text=title)
+        self.open_item_tree.column(key, width=width, anchor="w", stretch=False)
+    self.setup_sorting(self.open_item_tree)
+    configure_tree_tags(self.open_item_tree)
+
+    # Block 2 tabs
+    block2_notebook = ttk.Notebook(right)
+    block2_notebook.grid(row=0, column=0, sticky="nsew", padx=16, pady=16)
+    block2_notebook.grid_propagate(False)
+    tab_stack = tk.Frame(block2_notebook, bg=WHITE)
+    tab_release = tk.Frame(block2_notebook, bg=WHITE)
+    block2_notebook.add(tab_stack, text="Rechnungsstapel")
+    block2_notebook.add(tab_release, text="Rechnungsfreigabe")
+
+    tab_stack.grid_columnconfigure(0, weight=1)
+    tab_stack.grid_rowconfigure(2, weight=1)
+    stack_toolbar = tk.Frame(tab_stack, bg=WHITE)
+    stack_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    ttk.Button(stack_toolbar, text="Ordner importieren", style="Confirm.TButton", command=self.import_creditor_folder).pack(side="left")
+    ttk.Button(stack_toolbar, text="Dateien importieren", style="Confirm.TButton", command=self.import_creditor_files).pack(side="left", padx=(8, 0))
+    ttk.Button(stack_toolbar, text="Markierte Dokumente zusammenführen", style="Confirm.TButton", command=self.merge_selected_batches).pack(side="left", padx=(8, 0))
+
+    list_outer = tk.Frame(tab_stack, bg=CARD_BORDER)
+    list_outer.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+    list_inner = tk.Frame(list_outer, bg=WHITE)
+    list_inner.pack(fill="both", expand=True, padx=1, pady=1)
+    list_inner.grid_rowconfigure(0, weight=1)
+    list_inner.grid_columnconfigure(0, weight=1)
+    self.stack_tree = ttk.Treeview(list_inner, columns=("hist_no", "display_name", "import_date", "status"), show="headings", height=5, selectmode="extended")
+    self.stack_tree.grid(row=0, column=0, sticky="nsew")
+    st_scroll = ttk.Scrollbar(list_inner, orient="vertical", command=self.stack_tree.yview)
+    st_scroll.grid(row=0, column=1, sticky="ns")
+    self.stack_tree.configure(yscrollcommand=st_scroll.set)
+    for key, title, width in [("hist_no", "Hist.-Nr.", 90), ("display_name", "Dateiname", 210), ("import_date", "Importdatum", 125), ("status", "Status", 95)]:
+        self.stack_tree.heading(key, text=title)
+        self.stack_tree.column(key, width=width, anchor="w", stretch=False)
+    self.setup_sorting(self.stack_tree)
+    self.stack_tree.tag_configure("offen", background=SOFT_RED)
+    self.stack_tree.tag_configure("erfasst", background=SOFT_GREEN)
+    self.stack_tree.bind("<<TreeviewSelect>>", self._on_stack_select)
+    self.stack_tree.bind("<Double-1>", lambda e: "break")
+    self.stack_tree.bind("<Button-1>", self._on_stack_click)
+
+    preview_outer = tk.Frame(tab_stack, bg=CARD_BORDER)
+    preview_outer.grid(row=2, column=0, sticky="nsew")
+    preview_inner = tk.Frame(preview_outer, bg=WHITE)
+    preview_inner.pack(fill="both", expand=True, padx=1, pady=1)
+    preview_inner.grid_columnconfigure(0, weight=1)
+    preview_inner.grid_rowconfigure(1, weight=1)
+    self.preview_title_label = tk.Label(preview_inner, text="Kein Dokument ausgewählt", bg=WHITE, fg=TEXT, font=("Segoe UI", 11, "bold"), anchor="w")
+    self.preview_title_label.grid(row=0, column=0, sticky="ew", padx=8, pady=(10, 6))
+    self.preview_image_label = tk.Label(preview_inner, bg=WHITE, anchor="center")
+    self.preview_image_label.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 10))
+
+    tab_release.grid_columnconfigure(0, weight=1)
+    tab_release.grid_rowconfigure(0, weight=1)
+    rel_outer = tk.Frame(tab_release, bg=CARD_BORDER)
+    rel_outer.grid(row=0, column=0, sticky="nsew")
+    rel_inner = tk.Frame(rel_outer, bg=WHITE)
+    rel_inner.pack(fill="both", expand=True, padx=1, pady=1)
+    rel_inner.grid_rowconfigure(0, weight=1)
+    rel_inner.grid_columnconfigure(0, weight=1)
+    self.release_tree = ttk.Treeview(rel_inner, columns=("hist_no", "display_name", "captured_at", "invoice_no"), show="headings")
+    self.release_tree.grid(row=0, column=0, sticky="nsew")
+    rel_scroll = ttk.Scrollbar(rel_inner, orient="vertical", command=self.release_tree.yview)
+    rel_scroll.grid(row=0, column=1, sticky="ns")
+    self.release_tree.configure(yscrollcommand=rel_scroll.set)
+    for key, title, width in [("hist_no", "Hist.-Nr.", 90), ("display_name", "Dateiname", 210), ("captured_at", "Erfassungsdatum", 145), ("invoice_no", "Referenz", 100)]:
+        self.release_tree.heading(key, text=title)
+        self.release_tree.column(key, width=width, anchor="w", stretch=False)
+    self.release_tree.tag_configure("erfasst", background=SOFT_GREEN)
+
+    self._load_import_batches()
+    self._load_release_table()
+    self.invoice_menu = tk.Menu(self, tearoff=0)
+    self.invoice_menu.add_command(label="Rechnungsbeleg hinzufügen", command=self.add_attachment_to_selected_invoice)
+
+
+def _patched_open_vendor_quick_popup(self):
+    popup = tk.Toplevel(self)
+    popup.title("Kreditor-Stammdaten")
+    popup.geometry(_safe_center_parent_geometry(self, 760, 650))
+    popup.minsize(760, 650)
+    popup.configure(bg=WHITE)
+    popup.transient(self)
+
+    top = tk.Frame(popup, bg=WHITE)
+    top.pack(fill="x", padx=14, pady=(14, 8))
+    tk.Label(top, text="Kreditor anlegen / bearbeiten", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).pack(anchor="w")
+    tk.Label(top, text="Bestehenden Kreditor auswählen oder neue Stammdaten erfassen. Änderungen werden direkt in die Stammdaten geschrieben, ohne den Fortschritt im Kreditorenmodul zu verlieren.", bg=WHITE, fg=TEXT2, font=("Segoe UI", 9), wraplength=720, justify="left").pack(anchor="w", pady=(4, 0))
+
+    select_row = tk.Frame(popup, bg=WHITE)
+    select_row.pack(fill="x", padx=14, pady=(0, 8))
+    tk.Label(select_row, text="Bestehender Kreditor", bg=WHITE, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(side="left")
+    conn = get_connection()
+    try:
+        vendor_rows = conn.execute("SELECT * FROM vendors ORDER BY vendor_no ASC").fetchall()
+    finally:
+        conn.close()
+    vendor_map = {f"{row['vendor_no']} | {row['name']}": row for row in vendor_rows}
+    vendor_choice = tk.StringVar(value=(list(vendor_map.keys())[0] if vendor_map else ""))
+    vendor_combo = ttk.Combobox(select_row, textvariable=vendor_choice, values=list(vendor_map.keys()), state="readonly", width=48)
+    vendor_combo.pack(side="left", padx=(8, 0))
+    ttk.Button(select_row, text="Laden", style="Confirm.TButton", command=lambda: load_vendor()).pack(side="left", padx=(8, 0))
+
+    form_outer = tk.Frame(popup, bg=CARD_BORDER)
+    form_outer.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+    form_scroll = ScrollableFrame(form_outer)
+    form_scroll.pack(fill="both", expand=True, padx=1, pady=1)
+    form_scroll.canvas.configure(height=470)
+    body = form_scroll.content
+    form_vars = {
+        'vendor_no': tk.StringVar(), 'name': tk.StringVar(), 'street': tk.StringVar(), 'country_code': tk.StringVar(value='DE'),
+        'postal_code': tk.StringVar(), 'city': tk.StringVar(), 'iban': tk.StringVar(), 'vat_id': tk.StringVar(), 'tax_no': tk.StringVar(), 'active': tk.StringVar(value='Ja')
+    }
+    current_edit_id = {'id': None}
+    field_specs = [
+        ('vendor_no', 'Kreditor-ID *', 'entry'), ('name', 'Name *', 'entry'), ('street', 'Straße / Hausnummer', 'entry'), ('country_code', 'Länderkürzel', 'combo'),
+        ('postal_code', 'Postleitzahl', 'entry'), ('city', 'Ort / Stadt', 'entry'), ('iban', 'Kontoverbindung / IBAN', 'entry'), ('vat_id', 'USt.-ID', 'entry'), ('tax_no', 'Steuernummer', 'entry'), ('active', 'Aktiv', 'combo_yesno')
+    ]
+    for key, label, ftype in field_specs:
+        row = tk.Frame(body, bg=WHITE)
+        row.pack(fill="x", padx=16, pady=5)
+        tk.Label(row, text=label, bg=WHITE, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        if ftype == 'combo':
+            widget = ttk.Combobox(row, textvariable=form_vars[key], values=TRADE_COUNTRIES, state='readonly')
+        elif ftype == 'combo_yesno':
+            widget = ttk.Combobox(row, textvariable=form_vars[key], values=['Ja', 'Nein'], state='readonly')
+        else:
+            widget = ttk.Entry(row, textvariable=form_vars[key])
+        widget.pack(fill="x", pady=(4, 0))
+
+    def load_vendor():
+        choice = vendor_choice.get().strip()
+        if choice not in vendor_map:
+            return
+        row = vendor_map[choice]
+        current_edit_id['id'] = row['id']
+        for key in form_vars:
+            if key == 'active':
+                form_vars[key].set(int_to_yes_no(row[key]))
+            else:
+                form_vars[key].set('' if row[key] is None else str(row[key]))
+
+    def save_vendor():
+        if not form_vars['vendor_no'].get().strip() or not form_vars['name'].get().strip():
+            messagebox.showwarning(APP_NAME, 'Bitte mindestens Kreditor-ID und Name erfassen.', parent=popup)
+            return
+        vals = (
+            form_vars['vendor_no'].get().strip(), form_vars['name'].get().strip(), form_vars['street'].get().strip(), form_vars['country_code'].get().strip() or 'DE',
+            form_vars['postal_code'].get().strip(), form_vars['city'].get().strip(), form_vars['iban'].get().strip(), form_vars['vat_id'].get().strip(), form_vars['tax_no'].get().strip(), yes_no_to_int(form_vars['active'].get().strip() or 'Ja')
+        )
+        conn = get_connection()
+        try:
+            if current_edit_id['id'] is None:
+                conn.execute("INSERT INTO vendors (vendor_no, name, street, country_code, postal_code, city, iban, vat_id, tax_no, active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", vals)
+            else:
+                conn.execute("UPDATE vendors SET vendor_no = ?, name = ?, street = ?, country_code = ?, postal_code = ?, city = ?, iban = ?, vat_id = ?, tax_no = ?, active = ? WHERE id = ?", vals + (current_edit_id['id'],))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            messagebox.showerror(APP_NAME, 'Kreditor-ID existiert bereits.', parent=popup)
+            return
+        finally:
+            conn.close()
+        old_values = {
+            'invoice_no': self.invoice_no_var.get(), 'invoice_date': self.invoice_date_var.get(), 'due_date': self.due_date_var.get(), 'posting_text': self.posting_text_var.get(), 'amount': self.amount_var.get()
+        }
+        self._load_reference_data()
+        self._build_ui()
+        self.invoice_no_var.set(old_values['invoice_no'])
+        self.invoice_date_var.set(old_values['invoice_date'])
+        self.due_date_var.set(old_values['due_date'])
+        self.posting_text_var.set(old_values['posting_text'])
+        self.amount_var.set(old_values['amount'])
+        matching = [choice for choice, data in self.partner_display_map.items() if data['partner_no'] == form_vars['vendor_no'].get().strip()]
+        if matching:
+            self.partner_var.set(matching[0])
+        popup.destroy()
+
+    button_row = tk.Frame(body, bg=WHITE)
+    button_row.pack(fill="x", padx=16, pady=(14, 16))
+    ttk.Button(button_row, text='Speichern', style='Confirm.TButton', command=save_vendor).pack(side='left')
+    ttk.Button(button_row, text='Abbrechen', command=popup.destroy).pack(side='left', padx=(8, 0))
+
+CreditorsView._build_ui = _patched_creditors_build_ui_v063
+CreditorsView.open_vendor_quick_popup = _patched_open_vendor_quick_popup
+
+
+def _patched_creditor_import_paths(self, paths: List[str]) -> None:
+    paths = [p for p in paths if Path(p).suffix.lower() in SUPPORTED_ARCHIVE_EXTENSIONS]
+    if not paths:
+        messagebox.showinfo(APP_NAME, "Keine unterstützten Dateien ausgewählt.")
+        return
+    popup, info, progress = _create_progress_popup(self, "Importiere elektronische Rechnungen", len(paths))
+    conn = get_connection()
+    try:
+        for idx, file_path in enumerate(paths, start=1):
+            info.config(text=f"{idx}/{len(paths)}: {Path(file_path).name}")
+            progress['value'] = idx - 1
+            popup.update_idletasks()
+            hist_no = next_hist_no()
+            import_date = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+            conn.execute(
+                "INSERT INTO invoice_import_batches (module_name, hist_no, display_name, import_date, status, captured_at, captured_invoice_no) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("Kreditoren", hist_no, clean_document_title(file_path), import_date, "offen", "", ""),
+            )
+            conn.execute(
+                "INSERT INTO invoice_import_files (hist_no, file_path, file_name, file_ext, import_date) VALUES (?, ?, ?, ?, ?)",
+                (hist_no, file_path, Path(file_path).name, Path(file_path).suffix.lower(), import_date),
+            )
+            progress['value'] = idx
+            popup.update_idletasks()
+        conn.commit()
+    finally:
+        conn.close()
+        _close_progress_popup(popup)
+    self._load_import_batches()
+    self.status_callback(f"{len(paths)} Dokument(e) in den Kreditoren-Stapel importiert")
+
+
+def _patched_creditor_import_folder(self) -> None:
+    folder = filedialog.askdirectory(title="Ordner mit elektronischen Rechnungen auswählen")
+    if not folder:
+        return
+    files = iter_supported_files_from_folder(folder)
+    self._import_archive_paths(files)
+
+
+def _patched_creditor_import_files(self) -> None:
+    paths = list(filedialog.askopenfilenames(title="Dateien importieren"))
+    self._import_archive_paths(paths)
+
+
+def _patched_creditor_stack_click(self, event) -> None:
+    region = self.stack_tree.identify("region", event.x, event.y)
+    col = self.stack_tree.identify_column(event.x)
+    row_id = self.stack_tree.identify_row(event.y)
+    if region == "cell" and col == "#4" and row_id:
+        values = self.stack_tree.item(row_id, 'values')
+        hist_no = values[0]
+        status_text = values[3]
+        # Klick auf Statuszelle löscht Eintrag (soft via files+batches löschen)
+        if messagebox.askyesno(APP_NAME, f"Hist.-Nr. {hist_no} löschen?", parent=self):
+            conn = get_connection()
+            try:
+                conn.execute("DELETE FROM invoice_import_files WHERE hist_no = ?", (hist_no,))
+                conn.execute("DELETE FROM invoice_import_batches WHERE hist_no = ?", (hist_no,))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load_import_batches()
+            self._load_release_table()
+            self.current_hist_no = None
+            self.preview_title_label.config(text='Kein Dokument ausgewählt')
+            self.preview_image_label.config(image='', text='')
+        return "break"
+    return None
+
+
+def _patched_creditor_load_batches(self) -> None:
+    for item in self.stack_tree.get_children():
+        self.stack_tree.delete(item)
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT hist_no, display_name, import_date, status FROM invoice_import_batches WHERE module_name = 'Kreditoren' ORDER BY id DESC").fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        status_display = f"{row['status']} ✖"
+        tag = 'erfasst' if row['status'] == 'erfasst' else 'offen'
+        self.stack_tree.insert('', 'end', values=(row['hist_no'], row['display_name'], row['import_date'], status_display), tags=(tag,))
+
+
+def _patched_creditor_refresh_preview(self) -> None:
+    if not self.current_hist_no:
+        return
+    conn = get_connection()
+    try:
+        files = conn.execute("SELECT file_path FROM invoice_import_files WHERE hist_no = ? ORDER BY id ASC", (self.current_hist_no,)).fetchall()
+    finally:
+        conn.close()
+    if not files:
+        self.preview_title_label.config(text=f"{self.current_hist_no} – keine Datei gefunden")
+        self.preview_image_label.config(image='', text='Keine Vorschau', fg=TEXT2)
+        return
+    file_path = files[0]['file_path']
+    title = f"{self.current_hist_no} | {clean_document_title(file_path)}"
+    if len(files) > 1:
+        title += f" (+ {len(files)-1} weitere Datei(en))"
+    self.preview_title_label.config(text=title)
+    self.preview_photo = build_preview_photo(file_path, size=(610, 360))
+    self.preview_image_label.config(anchor='center', justify='center', wraplength=560)
+    if self.preview_photo is not None:
+        self.preview_image_label.config(image=self.preview_photo, text='')
+    else:
+        self.preview_image_label.config(image='', text='Für dieses Dokument ist aktuell keine echte Thumbnail-Vorschau verfügbar.', fg=TEXT2)
+
+
+def _patched_creditor_reload_invoices(self) -> None:
+    for item in self.invoice_tree.get_children():
+        self.invoice_tree.delete(item)
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT invoice_no, vendor_name AS partner_name, invoice_date, due_date, posting_text, amount, status FROM vendor_invoices ORDER BY id DESC LIMIT 200").fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        count = self.get_attachment_count(self.entity_type, row['invoice_no'])
+        open_amount = 0 if row['status'] == STATUS_PAID else row['amount']
+        _prio, tag, due_text = urgency_bucket(row['due_date'], row['status'], open_amount)
+        self.invoice_tree.insert('', 'end', values=(row['invoice_no'], row['partner_name'], row['invoice_date'], due_text, row['posting_text'], format_amount(row['amount']), row['status'], attachment_text(count)), tags=(tag,))
+
+
+def _patched_creditor_reload_open_items(self) -> None:
+    for item in self.open_item_tree.get_children():
+        self.open_item_tree.delete(item)
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT reference_no, partner_name, invoice_date, due_date, amount, open_amount, status FROM open_items WHERE item_type = ? ORDER BY id DESC LIMIT 200", (self.open_item_type,)).fetchall()
+    finally:
+        conn.close()
+    decorated = []
+    for row in rows:
+        prio, tag, due_text = urgency_bucket(row['due_date'], row['status'], row['open_amount'])
+        decorated.append((prio, row, tag, due_text))
+    decorated.sort(key=lambda x: x[0])
+    for _prio, row, tag, due_text in decorated:
+        status = compute_status_from_open_amount(row['amount'], row['open_amount'], row['due_date']) if row['status'] != STATUS_STORNO else STATUS_STORNO
+        count = self.get_attachment_count(self.entity_type, row['reference_no'])
+        self.open_item_tree.insert('', 'end', values=(row['reference_no'], row['partner_name'], row['invoice_date'], due_text, format_amount(row['amount']), format_amount(row['open_amount']), attachment_text(count), status), tags=(tag,))
+
+
+CreditorsView._import_archive_paths = _patched_creditor_import_paths
+CreditorsView.import_creditor_folder = _patched_creditor_import_folder
+CreditorsView.import_creditor_files = _patched_creditor_import_files
+CreditorsView._on_stack_click = _patched_creditor_stack_click
+CreditorsView._load_import_batches = _patched_creditor_load_batches
+CreditorsView._refresh_stack_preview = _patched_creditor_refresh_preview
+CreditorsView.reload_invoices = _patched_creditor_reload_invoices
+CreditorsView.reload_open_items = _patched_creditor_reload_open_items
+
+
 def main() -> None:
     ensure_directories()
     init_sqlite()
