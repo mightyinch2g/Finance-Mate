@@ -6391,6 +6391,332 @@ def _patched_stammdaten_build_ui_v612(self) -> None:
 StammdatenView._build_ui = _patched_stammdaten_build_ui_v612
 
 
+
+# === FINANCE MATE PATCH V0_6_13 ===
+APP_VERSION = "0.6.13"
+SIDEBAR_COLLAPSED_WIDTH = 42
+BUTTON_RELIEF_PADX = 10
+BUTTON_RELIEF_PADY = 5
+
+
+def create_standard_button(parent: tk.Widget, text: str, command=None, width=None, padx: int = BUTTON_RELIEF_PADX, pady: int = BUTTON_RELIEF_PADY, **kwargs):
+    effective_width = width
+    extra_padx = max(BUTTON_RELIEF_PADX, padx)
+    extra_pady = max(BUTTON_RELIEF_PADY, pady)
+    if text == "+":
+        extra_padx = max(extra_padx, 8)
+        if effective_width in (None, 3):
+            effective_width = 4
+    button = tk.Button(
+        parent,
+        text=text,
+        command=command,
+        bg=STANDARD_BUTTON_BG,
+        activebackground="#D3D0C8",
+        fg=TEXT,
+        activeforeground=TEXT,
+        relief="raised",
+        overrelief="raised",
+        bd=1,
+        highlightthickness=0,
+        highlightbackground=STANDARD_BUTTON_BORDER,
+        font=("Segoe UI", 9, "bold"),
+        padx=extra_padx,
+        pady=extra_pady,
+        height=1,
+        anchor="center",
+        cursor="hand2",
+    )
+    if effective_width is not None:
+        button.configure(width=effective_width)
+    if kwargs:
+        button.configure(**kwargs)
+    return button
+
+
+def _fm_v613_configure_ttk(self) -> None:
+    _fm_v610_configure_ttk(self)
+    style = ttk.Style(self)
+    for style_name in ("Confirm.TButton", "StandardGray.TButton", "ModuleRaised.TButton"):
+        style.configure(
+            style_name,
+            font=("Segoe UI", 9, "bold"),
+            padding=(10, 5),
+            foreground=TEXT,
+            background=STANDARD_BUTTON_BG,
+            borderwidth=1,
+            relief="raised",
+            focusthickness=0,
+        )
+        style.map(
+            style_name,
+            background=[("active", "#D3D0C8"), ("pressed", "#C9C6BD")],
+            foreground=[("active", TEXT), ("pressed", TEXT)],
+            relief=[("pressed", "sunken"), ("active", "raised")],
+        )
+    try:
+        style.configure(
+            "Treeview.Heading",
+            background=STANDARD_BUTTON_BG,
+            foreground=TEXT,
+            relief="raised",
+            borderwidth=1,
+            font=("Segoe UI", 9, "bold"),
+            padding=(8, 5),
+        )
+        style.map(
+            "Treeview.Heading",
+            background=[("active", "#D3D0C8"), ("pressed", "#C9C6BD")],
+            relief=[("pressed", "sunken"), ("active", "raised")],
+        )
+    except Exception:
+        pass
+
+
+FinanceMateApp._configure_ttk = _fm_v613_configure_ttk
+
+
+def _iter_buttons(widget: tk.Widget):
+    for child in widget.winfo_children():
+        if isinstance(child, (tk.Button, ttk.Button)):
+            yield child
+        yield from _iter_buttons(child)
+
+
+def _normalize_module_button_styles(widget: tk.Widget) -> None:
+    for child in _iter_buttons(widget):
+        if isinstance(child, ttk.Button):
+            try:
+                child.configure(style="ModuleRaised.TButton")
+            except Exception:
+                pass
+        elif isinstance(child, tk.Button):
+            try:
+                child.configure(
+                    bg=STANDARD_BUTTON_BG,
+                    activebackground="#D3D0C8",
+                    fg=TEXT,
+                    activeforeground=TEXT,
+                    relief="raised",
+                    overrelief="raised",
+                    bd=1,
+                    highlightthickness=0,
+                    highlightbackground=STANDARD_BUTTON_BORDER,
+                    font=("Segoe UI", 9, "bold"),
+                    padx=BUTTON_RELIEF_PADX,
+                    pady=BUTTON_RELIEF_PADY,
+                    height=1,
+                )
+            except Exception:
+                pass
+
+
+def attach_grid_splitter(container: tk.Widget, left_widget: tk.Widget, right_widget: tk.Widget, module_key: str, default_ratio: float = 0.60) -> None:
+    if hasattr(container, "_fm_splitter_line"):
+        try:
+            container._fm_splitter_line.destroy()
+        except Exception:
+            pass
+    line = tk.Frame(container, bg=SPLITTER_LINE_BG, cursor="sb_h_double_arrow", width=SPLITTER_WIDTH)
+    container._fm_splitter_line = line
+    state = {"left_width": None}
+    min_left = 1
+    min_right = 1
+    gap = 16
+
+    for widget in (left_widget, right_widget):
+        try:
+            widget.grid_propagate(True)
+        except Exception:
+            pass
+        try:
+            widget.configure(width=1)
+        except Exception:
+            pass
+
+    def available_width() -> int:
+        container.update_idletasks()
+        width = container.winfo_width()
+        if width <= 1:
+            width = left_widget.winfo_width() + right_widget.winfo_width() + gap
+        return max(40, width)
+
+    def clamp_left(value: int) -> int:
+        total = available_width()
+        return max(min_left, min(total - min_right, int(value)))
+
+    def saved_or_default() -> int:
+        raw = load_ui_preference("splitter", module_key, "")
+        if raw:
+            try:
+                return int(float(raw))
+            except Exception:
+                pass
+        return int(round(available_width() * default_ratio))
+
+    def apply_left_width(left_width: int | None = None, persist: bool = False) -> None:
+        total = available_width()
+        if left_width is None:
+            left_width = state["left_width"] if state["left_width"] is not None else saved_or_default()
+        left_width = clamp_left(left_width)
+        right_width = max(min_right, total - left_width - gap)
+        state["left_width"] = left_width
+        container.grid_columnconfigure(0, minsize=left_width, weight=0)
+        container.grid_columnconfigure(1, minsize=0, weight=0)
+        container.grid_columnconfigure(2, minsize=right_width, weight=1)
+        try:
+            left_widget.grid_configure(column=0, padx=(0, 8), sticky="nsew")
+            right_widget.grid_configure(column=2, padx=(8, 0), sticky="nsew")
+        except Exception:
+            pass
+        container.update_idletasks()
+        x_pos = left_widget.winfo_x() + left_widget.winfo_width() + 8 - int(SPLITTER_WIDTH / 2)
+        line.place(x=max(0, x_pos), y=0, width=SPLITTER_WIDTH, relheight=1.0)
+        line.lift()
+        if persist:
+            save_ui_preference("splitter", module_key, str(left_width))
+
+    def start_drag(_event=None):
+        line.configure(bg=SPLITTER_LINE_ACTIVE)
+
+    def drag(event):
+        x_local = event.x_root - container.winfo_rootx()
+        apply_left_width(x_local - 8)
+
+    def stop_drag(_event=None):
+        line.configure(bg=SPLITTER_LINE_BG)
+        apply_left_width(state.get("left_width"), persist=True)
+
+    line.bind("<ButtonPress-1>", start_drag)
+    line.bind("<B1-Motion>", drag)
+    line.bind("<ButtonRelease-1>", stop_drag)
+    container.bind("<Configure>", lambda _e: apply_left_width(state.get("left_width")), add="+")
+    container.after(100, lambda: apply_left_width())
+
+
+def _apply_sidebar_state_v613(self):
+    expanded = getattr(self, "sidebar_expanded", True)
+    self.sidebar_frame.configure(width=SIDEBAR_EXPANDED_WIDTH if expanded else SIDEBAR_COLLAPSED_WIDTH)
+    self.sidebar_toggle_btn.configure(text="◀" if expanded else "▶")
+    if expanded:
+        if not self.sidebar_title_label.winfo_manager():
+            self.sidebar_title_label.pack(anchor="w", padx=18, pady=(8, 10))
+        if not self.sidebar_subtitle_label.winfo_manager():
+            self.sidebar_subtitle_label.pack(anchor="w", padx=18, pady=(0, 12))
+        if not self.sidebar_nav_container.winfo_manager():
+            self.sidebar_nav_container.pack(fill="both", expand=True)
+    else:
+        self.sidebar_title_label.pack_forget()
+        self.sidebar_subtitle_label.pack_forget()
+        self.sidebar_nav_container.pack_forget()
+    self.sidebar_frame.update_idletasks()
+
+
+FinanceMateApp._apply_sidebar_state = _apply_sidebar_state_v613
+
+
+def _patched_build_sidebar_v613(self) -> None:
+    self.sidebar_frame = tk.Frame(self, bg=BG, width=SIDEBAR_EXPANDED_WIDTH, highlightthickness=1, highlightbackground=LINE)
+    self.sidebar_frame.grid(row=1, column=0, sticky="nsew")
+    self.sidebar_frame.grid_propagate(False)
+    head = tk.Frame(self.sidebar_frame, bg=BG)
+    head.pack(fill="x", padx=4, pady=(6, 6))
+    self.sidebar_toggle_btn = create_standard_button(head, "◀", command=lambda s=self: s.toggle_sidebar(), width=2, padx=2, pady=2)
+    self.sidebar_toggle_btn.pack(side="right")
+    self.sidebar_title_label = tk.Label(self.sidebar_frame, text="Module", bg=BG, fg=TEXT, font=("Segoe UI", 14, "bold"))
+    self.sidebar_title_label.pack(anchor="w", padx=18, pady=(8, 10))
+    self.sidebar_subtitle_label = tk.Label(self.sidebar_frame, text="Finance-Mate-Startnavigation", bg=BG, fg=TEXT2, font=("Segoe UI", 9))
+    self.sidebar_subtitle_label.pack(anchor="w", padx=18, pady=(0, 12))
+    self.sidebar_nav_container = tk.Frame(self.sidebar_frame, bg=BG)
+    self.sidebar_nav_container.pack(fill="both", expand=True)
+    self.nav_buttons = {}
+    for module_name in self.nav_order:
+        btn = ttk.Button(self.sidebar_nav_container, text=module_name, style="Nav.TButton", command=lambda value=module_name: self.show_module(value))
+        btn.pack(fill="x", padx=14, pady=4)
+        self.nav_buttons[module_name] = btn
+    self._apply_sidebar_state()
+
+
+FinanceMateApp._build_sidebar = _patched_build_sidebar_v613
+
+
+def _unlock_module_shell(shell: tk.Widget):
+    children = _grid_children_sorted(shell)
+    for idx in range(3):
+        try:
+            shell.grid_columnconfigure(idx, minsize=0, weight=0)
+        except Exception:
+            pass
+    for child in children:
+        try:
+            child.grid_propagate(True)
+        except Exception:
+            pass
+        try:
+            child.configure(width=1)
+        except Exception:
+            pass
+    return children
+
+
+_prev_journal_build_ui_v613 = JournalView._build_ui
+
+def _patched_journal_build_ui_v613(self) -> None:
+    _prev_journal_build_ui_v613(self)
+    shell = _find_module_shell(self)
+    if shell is not None:
+        children = _unlock_module_shell(shell)
+        if len(children) >= 2:
+            attach_grid_splitter(shell, children[0], children[1], "Finanzbuchhaltung")
+
+
+JournalView._build_ui = _patched_journal_build_ui_v613
+
+
+_prev_debitors_build_ui_v613 = DebitorsView._build_ui
+
+def _patched_debitors_build_ui_v613(self) -> None:
+    _prev_debitors_build_ui_v613(self)
+    shell = _find_module_shell(self)
+    if shell is not None:
+        children = _unlock_module_shell(shell)
+        if len(children) >= 2:
+            attach_grid_splitter(shell, children[0], children[1], "Debitoren")
+    _normalize_module_button_styles(self)
+
+
+DebitorsView._build_ui = _patched_debitors_build_ui_v613
+
+
+_prev_creditors_build_ui_v613 = CreditorsView._build_ui
+
+def _patched_creditors_build_ui_v613(self) -> None:
+    _prev_creditors_build_ui_v613(self)
+    shell = _find_module_shell(self)
+    if shell is not None:
+        children = _unlock_module_shell(shell)
+        if len(children) >= 2:
+            attach_grid_splitter(shell, children[0], children[1], "Kreditoren")
+    _normalize_module_button_styles(self)
+
+
+CreditorsView._build_ui = _patched_creditors_build_ui_v613
+
+
+_prev_stammdaten_build_ui_v613 = StammdatenView._build_ui
+
+def _patched_stammdaten_build_ui_v613(self) -> None:
+    _prev_stammdaten_build_ui_v613(self)
+    shell = _find_module_shell(self)
+    if shell is not None:
+        children = _unlock_module_shell(shell)
+        if len(children) >= 2:
+            attach_grid_splitter(shell, children[0], children[1], "Stammdaten", default_ratio=0.56)
+
+
+StammdatenView._build_ui = _patched_stammdaten_build_ui_v613
+
+
 def main() -> None:
     ensure_directories()
     init_sqlite()
