@@ -3314,6 +3314,400 @@ CreditorsView.reload_invoices = _patched_creditor_reload_invoices
 CreditorsView.reload_open_items = _patched_creditor_reload_open_items
 
 
+
+# === FINANCE MATE PATCH V0_6_4 ===
+APP_VERSION = "0.6.4"
+
+
+def _next_counter_value_inline(conn: sqlite3.Connection, key: str) -> int:
+    row = conn.execute("SELECT value FROM app_meta WHERE key = ?", (key,)).fetchone()
+    current = int(row["value"]) if row and str(row["value"]).isdigit() else 0
+    nxt = current + 1
+    conn.execute("INSERT INTO app_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, str(nxt)))
+    return nxt
+
+
+def _patched_stammdaten_build_tab_v064(self, tab_name: str, parent: tk.Frame) -> None:
+    parent.grid_rowconfigure(1, weight=1)
+    parent.grid_columnconfigure(0, weight=2)
+    parent.grid_columnconfigure(1, weight=1)
+    toolbar = tk.Frame(parent, bg=WHITE)
+    toolbar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 10))
+    toolbar.grid_columnconfigure(1, weight=1)
+    tk.Label(toolbar, text=f"{tab_name} verwalten", bg=WHITE, fg=TEXT, font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w")
+    search_var = tk.StringVar()
+    self.search_vars[tab_name] = search_var
+    search_entry = ttk.Entry(toolbar, textvariable=search_var)
+    search_entry.grid(row=0, column=1, sticky="e", padx=(16, 6))
+    search_entry.bind("<KeyRelease>", lambda _event, name=tab_name: self.load_table_data(name))
+    ttk.Button(toolbar, text="Aktualisieren", style="Confirm.TButton", command=lambda name=tab_name: self.load_table_data(name)).grid(row=0, column=2, sticky="e")
+
+    left = tk.Frame(parent, bg=WHITE)
+    left.grid(row=1, column=0, sticky="nsew", padx=(8, 12), pady=(0, 8))
+    left.grid_rowconfigure(0, weight=1)
+    left.grid_columnconfigure(0, weight=1)
+    right = tk.Frame(parent, bg=WHITE)
+    right.grid(row=1, column=1, sticky="nsew", padx=(0, 8), pady=(0, 8))
+    right.grid_rowconfigure(0, weight=1)
+    right.grid_columnconfigure(0, weight=1)
+
+    tree = self._create_treeview(left, tab_name)
+    self.trees[tab_name] = tree
+    tree.bind("<<TreeviewSelect>>", lambda _event, name=tab_name: self.load_selected_record(name))
+    self.setup_sorting(tree)
+
+    form_outer = tk.Frame(right, bg=CARD_BORDER, height=430)
+    form_outer.grid(row=0, column=0, sticky="nsew")
+    form_outer.grid_propagate(False)
+    form_scroll = ScrollableFrame(form_outer)
+    form_scroll.pack(fill="both", expand=True, padx=1, pady=1)
+    # bewusst kleiner als Inhaltsmenge, damit Scrollbalken sicher sichtbar bleibt
+    form_scroll.canvas.configure(height=340)
+    form_body = form_scroll.content
+
+    tk.Label(form_body, text="Eintrag anlegen / bearbeiten", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=16, pady=(16, 6))
+    mode_label = tk.Label(form_body, text="Modus: Neuer Eintrag", bg=WHITE, fg=TEXT2, font=("Segoe UI", 9), wraplength=320, justify="left")
+    mode_label.pack(anchor="w", padx=16, pady=(0, 12))
+    self.mode_labels[tab_name] = mode_label
+    ttk.Label(form_body, text="* = Pflichtfeld. Alle anderen Felder sind optional.", style="Hint.TLabel", wraplength=320, justify="left").pack(anchor="w", padx=16, pady=(0, 8))
+
+    field_widgets: Dict[str, tk.Widget] = {}
+    for field_key, label_text, field_type, *rest in self.tab_configs[tab_name]["form_fields"]:
+        row = tk.Frame(form_body, bg=WHITE)
+        row.pack(fill="x", padx=16, pady=5)
+        tk.Label(row, text=label_text, bg=WHITE, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        if field_type == "combo":
+            values = rest[0] if rest else []
+            widget = ttk.Combobox(row, values=values, state="readonly")
+            if field_key == "country_code":
+                widget.set("DE")
+            elif values:
+                widget.set(values[0])
+        else:
+            widget = ttk.Entry(row)
+        widget.pack(fill="x", pady=(4, 0))
+        field_widgets[field_key] = widget
+    button_row = tk.Frame(form_body, bg=WHITE)
+    button_row.pack(fill="x", padx=16, pady=(10, 16))
+    ttk.Button(button_row, text="Speichern / Aktualisieren", style="Confirm.TButton", command=lambda name=tab_name: self.save_record(name)).pack(side="left")
+    ttk.Button(button_row, text="Felder leeren", command=lambda name=tab_name: self.clear_form(name)).pack(side="left", padx=(8, 0))
+    self.forms[tab_name] = field_widgets
+
+StammdatenView._build_tab = _patched_stammdaten_build_tab_v064
+
+
+def build_preview_image_pil(file_path: str, size=(610, 360)):
+    if not PIL_AVAILABLE:
+        return None
+    try:
+        ext = Path(file_path).suffix.lower()
+        if ext in {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tif', '.tiff'}:
+            return Image.open(file_path).convert('RGB')
+        if ext == '.pdf' and FITZ_AVAILABLE:
+            doc = fitz.open(file_path)
+            if len(doc) > 0:
+                page = doc.load_page(0)
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
+                return Image.frombytes('RGB', [pix.width, pix.height], pix.samples)
+        # fallback als visuelle Dokumentkarte
+        lim_size = (max(size[0], 610), max(size[1], 360))
+        preview_lines = []
+        if ext in {'.txt', '.csv'}:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as fh:
+                preview_lines = [line.rstrip() for _, line in zip(range(18), fh)]
+        elif ext in {'.xlsx', '.xlsm'}:
+            try:
+                from openpyxl import load_workbook
+                wb = load_workbook(file_path, read_only=True, data_only=True)
+                ws = wb[wb.sheetnames[0]]
+                for ridx, row in enumerate(ws.iter_rows(values_only=True)):
+                    vals = [str(v) for v in row[:6] if v not in (None, '')]
+                    if vals:
+                        preview_lines.append(' | '.join(vals))
+                    if ridx >= 17:
+                        break
+            except Exception:
+                preview_lines = ['Excel-Vorschau konnte nicht vollständig gerendert werden.']
+        elif ext == '.docx':
+            try:
+                import docx
+                doc = docx.Document(file_path)
+                preview_lines = [par.text for par in doc.paragraphs if par.text.strip()][:18]
+            except Exception:
+                preview_lines = ['DOCX-Vorschau konnte nicht vollständig gerendert werden.']
+        else:
+            preview_lines = [f'Dateityp {ext or "unbekannt"}', 'Für diesen Typ ist aktuell keine echte Pixelvorschau vorhanden.']
+        from PIL import ImageDraw, ImageFont
+        canvas = Image.new('RGB', lim_size, 'white')
+        draw = ImageDraw.Draw(canvas)
+        font = ImageFont.load_default()
+        draw.rectangle((0, 0, lim_size[0], 44), fill='#EAF1F8')
+        draw.text((12, 14), clean_document_title(file_path)[:90], fill='#004B93', font=font)
+        y = 58
+        draw.rectangle((10, 54, lim_size[0]-10, lim_size[1]-10), outline='#B7C6D5', width=1)
+        for line in preview_lines[:20]:
+            draw.text((22, y), line[:110], fill='#182431', font=font)
+            y += 17
+            if y > lim_size[1] - 28:
+                break
+        return canvas
+    except Exception:
+        return None
+
+
+def _render_preview_on_canvas(self):
+    if not hasattr(self, 'preview_canvas') or self.preview_canvas is None:
+        return
+    canvas = self.preview_canvas
+    canvas.delete('all')
+    if getattr(self, 'preview_base_image', None) is None:
+        return
+    canvas.update_idletasks()
+    cw = max(10, canvas.winfo_width())
+    ch = max(10, canvas.winfo_height())
+    base = self.preview_base_image
+    zoom = max(0.2, min(6.0, getattr(self, 'preview_zoom', 1.0)))
+    nw = max(20, int(base.width * zoom))
+    nh = max(20, int(base.height * zoom))
+    img = base.resize((nw, nh), Image.LANCZOS)
+    self.preview_photo = ImageTk.PhotoImage(img)
+    ox, oy = getattr(self, 'preview_offset', (0, 0))
+    padx = 25
+    pady = 25
+    min_x = min((cw - nw) / 2 + padx, (cw - nw) / 2)
+    max_x = max((cw - nw) / 2 - padx, (cw - nw) / 2)
+    min_y = min((ch - nh) / 2 + pady, (ch - nh) / 2)
+    max_y = max((ch - nh) / 2 - pady, (ch - nh) / 2)
+    if nw <= cw:
+        ox = (cw - nw) / 2
+    else:
+        ox = min(padx, max(cw - nw - padx, ox))
+    if nh <= ch:
+        oy = (ch - nh) / 2
+    else:
+        oy = min(pady, max(ch - nh - pady, oy))
+    self.preview_offset = (ox, oy)
+    canvas.create_image(ox, oy, image=self.preview_photo, anchor='nw', tags=('preview',))
+    canvas.config(scrollregion=(0, 0, cw, ch))
+
+
+def _preview_zoom(self, event):
+    if getattr(self, 'preview_base_image', None) is None:
+        return "break"
+    delta = getattr(event, 'delta', 0)
+    if delta == 0 and getattr(event, 'num', None) == 4:
+        delta = 120
+    elif delta == 0 and getattr(event, 'num', None) == 5:
+        delta = -120
+    factor = 1.12 if delta > 0 else 0.89
+    self.preview_zoom = max(0.25, min(5.0, getattr(self, 'preview_zoom', 1.0) * factor))
+    _render_preview_on_canvas(self)
+    return "break"
+
+
+def _preview_pan_start(self, event):
+    self._pan_last = (event.x, event.y)
+    return "break"
+
+
+def _preview_pan_move(self, event):
+    if getattr(self, '_pan_last', None) is None or getattr(self, 'preview_base_image', None) is None:
+        return "break"
+    lx, ly = self._pan_last
+    ox, oy = getattr(self, 'preview_offset', (0, 0))
+    self.preview_offset = (ox + (event.x - lx), oy + (event.y - ly))
+    self._pan_last = (event.x, event.y)
+    _render_preview_on_canvas(self)
+    return "break"
+
+
+def _preview_pan_end(self, _event):
+    self._pan_last = None
+    return "break"
+
+
+def _patched_creditors_build_ui_v064(self) -> None:
+    _patched_creditors_build_ui_v063(self)
+    # Plus-Button sicher sichtbar direkt neben Label nachziehen, falls vorhandener Bereich ihn nicht zeigte
+    # form content im linken oberen Bereich erneut lokalisieren und keinen Neuaufbau riskieren
+    # Tree Header-Anpassungen / Reihenfolge erfolgen durch reload-Methoden und neues Build hier über bestehende Widgets möglich
+    # Vorschau-Label in Canvas umwandeln
+    try:
+        parent = self.preview_image_label.master
+        self.preview_image_label.destroy()
+        self.preview_canvas = tk.Canvas(parent, bg=WHITE, highlightthickness=0)
+        self.preview_canvas.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 10))
+        self.preview_canvas.bind("<MouseWheel>", lambda e: _preview_zoom(self, e))
+        self.preview_canvas.bind("<Button-4>", lambda e: _preview_zoom(self, e))
+        self.preview_canvas.bind("<Button-5>", lambda e: _preview_zoom(self, e))
+        self.preview_canvas.bind("<ButtonPress-1>", lambda e: _preview_pan_start(self, e))
+        self.preview_canvas.bind("<B1-Motion>", lambda e: _preview_pan_move(self, e))
+        self.preview_canvas.bind("<ButtonRelease-1>", lambda e: _preview_pan_end(self, e))
+        self.preview_canvas.bind("<Configure>", lambda _e: _render_preview_on_canvas(self))
+        self.preview_base_image = None
+        self.preview_zoom = 1.0
+        self.preview_offset = (0, 0)
+    except Exception:
+        self.preview_canvas = None
+
+CreditorsView._build_ui = _patched_creditors_build_ui_v064
+
+
+def _patched_creditor_import_paths_v064(self, paths: List[str]) -> None:
+    paths = [p for p in paths if Path(p).suffix.lower() in SUPPORTED_ARCHIVE_EXTENSIONS]
+    if not paths:
+        messagebox.showinfo(APP_NAME, "Keine unterstützten Dateien ausgewählt.")
+        return
+    popup, info, progress = _create_progress_popup(self, "Importiere elektronische Rechnungen", len(paths))
+    conn = get_connection()
+    imported = 0
+    try:
+        for idx, file_path in enumerate(paths, start=1):
+            info.config(text=f"{idx}/{len(paths)}: {Path(file_path).name}")
+            progress['value'] = idx - 1
+            popup.update_idletasks()
+            hist_no = f"H-{_next_counter_value_inline(conn, 'import_hist_counter'):06d}"
+            import_date = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+            conn.execute("INSERT INTO invoice_import_batches (module_name, hist_no, display_name, import_date, status, captured_at, captured_invoice_no) VALUES (?, ?, ?, ?, ?, ?, ?)", ("Kreditoren", hist_no, clean_document_title(file_path), import_date, "offen", "", ""))
+            conn.execute("INSERT INTO invoice_import_files (hist_no, file_path, file_name, file_ext, import_date) VALUES (?, ?, ?, ?, ?)", (hist_no, file_path, Path(file_path).name, Path(file_path).suffix.lower(), import_date))
+            imported += 1
+            progress['value'] = idx
+            popup.update_idletasks()
+        conn.commit()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        messagebox.showerror(APP_NAME, f"Import abgebrochen:\n{exc}", parent=self)
+    finally:
+        conn.close()
+        _close_progress_popup(popup)
+    self._load_import_batches()
+    self.status_callback(f"{imported} Dokument(e) in den Kreditoren-Stapel importiert")
+
+CreditorsView._import_archive_paths = _patched_creditor_import_paths_v064
+
+
+def _patched_creditor_stack_click_v064(self, event) -> None:
+    region = self.stack_tree.identify("region", event.x, event.y)
+    col = self.stack_tree.identify_column(event.x)
+    row_id = self.stack_tree.identify_row(event.y)
+    if not row_id:
+        return None
+    # Extra Markierungsspalte
+    if region == "cell" and col == "#5":
+        values = list(self.stack_tree.item(row_id, 'values'))
+        values[4] = '☑' if values[4] != '☑' else '☐'
+        self.stack_tree.item(row_id, values=values)
+        return "break"
+    if region == "cell" and col == "#4":
+        hist_no = self.stack_tree.item(row_id, 'values')[0]
+        if messagebox.askyesno(APP_NAME, f"Hist.-Nr. {hist_no} löschen?", parent=self):
+            conn = get_connection()
+            try:
+                conn.execute("DELETE FROM invoice_import_files WHERE hist_no = ?", (hist_no,))
+                conn.execute("DELETE FROM invoice_import_batches WHERE hist_no = ?", (hist_no,))
+                conn.commit()
+            finally:
+                conn.close()
+            self._load_import_batches()
+            self._load_release_table()
+            self.current_hist_no = None
+            self.preview_title_label.config(text='Kein Dokument ausgewählt')
+            if getattr(self, 'preview_canvas', None) is not None:
+                self.preview_canvas.delete('all')
+        return "break"
+    return None
+
+CreditorsView._on_stack_click = _patched_creditor_stack_click_v064
+
+
+def _patched_creditor_merge_v064(self) -> None:
+    hist_nos = []
+    for item in self.stack_tree.get_children():
+        vals = self.stack_tree.item(item, 'values')
+        if len(vals) >= 5 and vals[4] == '☑':
+            hist_nos.append(vals[0])
+    if len(hist_nos) < 2:
+        # fallback selections
+        selected = self.stack_tree.selection()
+        hist_nos = [self.stack_tree.item(item, 'values')[0] for item in selected]
+    if len(hist_nos) < 2:
+        messagebox.showinfo(APP_NAME, "Bitte mindestens zwei markierte Dokumente wählen.")
+        return
+    target = hist_nos[0]
+    conn = get_connection()
+    try:
+        for hist_no in hist_nos[1:]:
+            conn.execute("UPDATE invoice_import_files SET hist_no = ? WHERE hist_no = ?", (target, hist_no))
+            conn.execute("DELETE FROM invoice_import_batches WHERE hist_no = ?", (hist_no,))
+        conn.commit()
+    finally:
+        conn.close()
+    self._load_import_batches()
+    self.status_callback(f"{len(hist_nos)} Dokumente unter {target} zusammengeführt")
+
+CreditorsView.merge_selected_batches = _patched_creditor_merge_v064
+
+
+def _patched_creditor_load_batches_v064(self) -> None:
+    for item in self.stack_tree.get_children():
+        self.stack_tree.delete(item)
+    # columns maybe from previous build, ensure checkbox column exists once by rebuilding headings if necessary
+    expected = ("hist_no", "display_name", "import_date", "status", "mark")
+    try:
+        if tuple(self.stack_tree['columns']) != expected:
+            self.stack_tree.configure(columns=expected)
+            for key, title, width in [("hist_no", "Hist.-Nr.", 90), ("display_name", "Dateiname", 195), ("import_date", "Importdatum", 120), ("status", "Status", 84), ("mark", "☐", 34)]:
+                self.stack_tree.heading(key, text=title)
+                self.stack_tree.column(key, width=width, anchor="w", stretch=False)
+    except Exception:
+        pass
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT hist_no, display_name, import_date, status FROM invoice_import_batches WHERE module_name = 'Kreditoren' ORDER BY id DESC").fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        tag = 'erfasst' if row['status'] == 'erfasst' else 'offen'
+        self.stack_tree.insert('', 'end', values=(row['hist_no'], row['display_name'], row['import_date'], f"{row['status']} ✖", '☐'), tags=(tag,))
+
+CreditorsView._load_import_batches = _patched_creditor_load_batches_v064
+
+
+def _patched_creditor_refresh_preview_v064(self) -> None:
+    if not self.current_hist_no:
+        return
+    conn = get_connection()
+    try:
+        files = conn.execute("SELECT file_path FROM invoice_import_files WHERE hist_no = ? ORDER BY id ASC", (self.current_hist_no,)).fetchall()
+    finally:
+        conn.close()
+    if not files:
+        self.preview_title_label.config(text=f"{self.current_hist_no} – keine Datei gefunden")
+        if getattr(self, 'preview_canvas', None) is not None:
+            self.preview_canvas.delete('all')
+        return
+    file_path = files[0]['file_path']
+    title = f"{self.current_hist_no} | {clean_document_title(file_path)}"
+    if len(files) > 1:
+        title += f" (+ {len(files)-1} weitere Datei(en))"
+    self.preview_title_label.config(text=title)
+    self.preview_base_image = build_preview_image_pil(file_path, size=(610, 360))
+    self.preview_zoom = 1.0
+    self.preview_offset = (0, 0)
+    _render_preview_on_canvas(self)
+
+CreditorsView._refresh_stack_preview = _patched_creditor_refresh_preview_v064
+
+
+def _patched_creditor_load_reference_data_v064(self):
+    InvoiceModuleBase._load_reference_data(self)
+
+CreditorsView._load_reference_data = _patched_creditor_load_reference_data_v064
+
+
 def main() -> None:
     ensure_directories()
     init_sqlite()
