@@ -5789,6 +5789,608 @@ def _fm_v611_app_init(self, config: AppConfig | None = None):
 
 FinanceMateApp.__init__ = _fm_v611_app_init
 
+
+# === FINANCE MATE PATCH V0_6_12 ===
+APP_VERSION = "0.6.12"
+UI_LAYOUT_USER = os.environ.get("FINANCEMATE_UI_USER") or os.environ.get("USERNAME") or os.environ.get("USER") or "default"
+BASE_TK_SCALING = 1.3333333333
+SPLITTER_LINE_BG = "#B6BFC8"
+SPLITTER_LINE_ACTIVE = "#A9B3BE"
+SPLITTER_WIDTH = 6
+SIDEBAR_COLLAPSED_WIDTH = 54
+SIDEBAR_EXPANDED_WIDTH = SIDEBAR_WIDTH
+SIDEBAR_ABBREVIATIONS = {
+    "Dashboard": "D",
+    "Stammdaten": "ST",
+    "Finanzbuchhaltung": "FB",
+    "Debitoren": "DE",
+    "Kreditoren": "KR",
+    "Zahlungen": "ZA",
+    "Reporting": "RE",
+    "Audit": "AU",
+    "Einstellungen": "EI",
+}
+
+
+def _ui_pref_key(section: str, name: str, user: str | None = None) -> str:
+    return f"ui_pref::{user or UI_LAYOUT_USER}::{section}::{name}"
+
+
+def load_ui_preference(section: str, name: str, default: str = "") -> str:
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT value FROM app_meta WHERE key = ?", (_ui_pref_key(section, name),)).fetchone()
+        return str(row["value"]) if row and row["value"] is not None else default
+    finally:
+        conn.close()
+
+
+def save_ui_preference(section: str, name: str, value: str) -> None:
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO app_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (_ui_pref_key(section, name), str(value)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _enable_windows_dpi_awareness() -> None:
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+            return
+        except Exception:
+            pass
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            return
+        except Exception:
+            pass
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _apply_root_scaling_before_build_v612(root: tk.Tk) -> None:
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    target_width, target_height, scale_factor = _design_fit_for_screen(screen_width, screen_height)
+    _apply_runtime_layout_scaling(scale_factor)
+    try:
+        root.tk.call("tk", "scaling", BASE_TK_SCALING * scale_factor)
+    except Exception:
+        pass
+    pos_x = max(0, int((screen_width - target_width) / 2))
+    pos_y = max(0, int((screen_height - target_height) / 2))
+    root.geometry(f"{target_width}x{target_height}+{pos_x}+{pos_y}")
+    root.minsize(max(920, int(target_width * 0.82)), max(620, int(target_height * 0.82)))
+    root._fm_screen_target_size = (target_width, target_height)
+    root._fm_display_scale = scale_factor
+
+
+_apply_root_scaling_before_build = _apply_root_scaling_before_build_v612
+
+
+def _fm_v612_app_init(self, config: AppConfig | None = None):
+    _enable_windows_dpi_awareness()
+    tk.Tk.__init__(self)
+    self.config_obj = config or AppConfig()
+    _apply_root_scaling_before_build(self)
+    self.title(f"{self.config_obj.title} {APP_VERSION}")
+    self.configure(bg=BG)
+
+    self.nav_buttons: Dict[str, ttk.Button] = {}
+    self.nav_order = ["Dashboard", "Stammdaten", "Finanzbuchhaltung", "Debitoren", "Kreditoren", "Zahlungen", "Reporting", "Audit", "Einstellungen"]
+    self.active_module = tk.StringVar(value="Dashboard")
+    self.sidebar_expanded = load_ui_preference("sidebar", "expanded", "1") != "0"
+
+    self._configure_ttk()
+    self._build_layout()
+    self._build_header()
+    self._build_sidebar()
+    self._build_workspace()
+    self._build_footer()
+    self.show_module("Dashboard")
+
+
+FinanceMateApp.__init__ = _fm_v612_app_init
+
+
+def _iter_descendants(widget: tk.Widget):
+    for child in widget.winfo_children():
+        yield child
+        yield from _iter_descendants(child)
+
+
+def _remove_label_by_prefix(parent: tk.Widget, prefixes: tuple[str, ...]) -> None:
+    for child in list(_iter_descendants(parent)):
+        if isinstance(child, tk.Label):
+            text = str(child.cget("text") or "")
+            if any(text.startswith(prefix) for prefix in prefixes):
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+
+
+def _find_module_shell(view: tk.Widget):
+    candidates = []
+    for child in view.winfo_children():
+        if isinstance(child, tk.Frame):
+            info = child.grid_info()
+            if str(info.get("row", "")) == "2":
+                candidates.append(child)
+    return candidates[0] if candidates else None
+
+
+def _grid_children_sorted(container: tk.Widget):
+    children = []
+    for child in container.winfo_children():
+        info = child.grid_info()
+        if info:
+            try:
+                col = int(info.get("column", 0))
+            except Exception:
+                col = 0
+            children.append((col, child))
+    children.sort(key=lambda item: item[0])
+    return [child for _col, child in children]
+
+
+def attach_grid_splitter(container: tk.Widget, left_widget: tk.Widget, right_widget: tk.Widget, module_key: str, default_ratio: float = 0.60) -> None:
+    if getattr(container, "_fm_splitter_attached", False):
+        return
+    container._fm_splitter_attached = True
+    line = tk.Frame(container, bg=SPLITTER_LINE_BG, cursor="sb_h_double_arrow", width=SPLITTER_WIDTH)
+    state = {"dragging": False, "left_width": None}
+    min_left = _scale_px(360)
+    min_right = _scale_px(300)
+
+    def available_width() -> int:
+        container.update_idletasks()
+        width = container.winfo_width()
+        if width <= 1:
+            width = left_widget.winfo_width() + right_widget.winfo_width() + 16
+        return max(min_left + min_right + 20, width)
+
+    def clamp_left(value: int) -> int:
+        total = available_width()
+        return max(min_left, min(total - min_right, int(value)))
+
+    def apply_left_width(left_width: int | None = None, persist: bool = False) -> None:
+        total = available_width()
+        saved = state.get("left_width")
+        if left_width is None:
+            if saved is None:
+                raw = load_ui_preference("splitter", module_key, "")
+                if raw:
+                    try:
+                        saved = int(float(raw))
+                    except Exception:
+                        saved = None
+            if saved is None:
+                saved = int(round(total * default_ratio))
+            left_width = saved
+        left_width = clamp_left(left_width)
+        state["left_width"] = left_width
+        container.grid_columnconfigure(0, minsize=left_width, weight=0)
+        container.grid_columnconfigure(1, minsize=max(min_right, total - left_width), weight=1)
+        container.update_idletasks()
+        x_pos = left_widget.winfo_x() + left_widget.winfo_width() + 8 - int(SPLITTER_WIDTH / 2)
+        line.place(x=x_pos, y=0, width=SPLITTER_WIDTH, relheight=1.0)
+        line.lift()
+        if persist:
+            save_ui_preference("splitter", module_key, str(left_width))
+
+    def start_drag(_event=None):
+        state["dragging"] = True
+        line.configure(bg=SPLITTER_LINE_ACTIVE)
+
+    def drag(event):
+        x_local = event.x_root - container.winfo_rootx()
+        desired = int(x_local - 8)
+        apply_left_width(desired)
+
+    def stop_drag(_event=None):
+        state["dragging"] = False
+        line.configure(bg=SPLITTER_LINE_BG)
+        apply_left_width(state.get("left_width"), persist=True)
+
+    line.bind("<ButtonPress-1>", start_drag)
+    line.bind("<B1-Motion>", drag)
+    line.bind("<ButtonRelease-1>", stop_drag)
+    container.bind("<Configure>", lambda _e: apply_left_width(state.get("left_width")))
+    container.after(80, lambda: apply_left_width())
+
+
+def _apply_sidebar_state_v612(self):
+    expanded = getattr(self, "sidebar_expanded", True)
+    width = SIDEBAR_EXPANDED_WIDTH if expanded else SIDEBAR_COLLAPSED_WIDTH
+    self.sidebar_frame.configure(width=width)
+    self.sidebar_title_label.configure(text="Module" if expanded else "")
+    self.sidebar_subtitle_label.configure(text="Finance-Mate-Startnavigation" if expanded else "")
+    self.sidebar_toggle_btn.configure(text="◀" if expanded else "▶")
+    for name, btn in self.nav_buttons.items():
+        btn.configure(text=name if expanded else SIDEBAR_ABBREVIATIONS.get(name, name[:2].upper()))
+    self.sidebar_frame.update_idletasks()
+
+
+def _toggle_sidebar_v612(self):
+    self.sidebar_expanded = not getattr(self, "sidebar_expanded", True)
+    save_ui_preference("sidebar", "expanded", "1" if self.sidebar_expanded else "0")
+    _apply_sidebar_state_v612(self)
+
+
+FinanceMateApp.toggle_sidebar = _toggle_sidebar_v612
+FinanceMateApp._apply_sidebar_state = _apply_sidebar_state_v612
+
+
+def _patched_build_sidebar_v612(self) -> None:
+    self.sidebar_frame = tk.Frame(self, bg=BG, width=SIDEBAR_EXPANDED_WIDTH, highlightthickness=1, highlightbackground=LINE)
+    self.sidebar_frame.grid(row=1, column=0, sticky="nsew")
+    self.sidebar_frame.grid_propagate(False)
+
+    head = tk.Frame(self.sidebar_frame, bg=BG)
+    head.pack(fill="x", padx=8, pady=(10, 6))
+    self.sidebar_toggle_btn = create_standard_button(head, "◀", command=lambda s=self: s.toggle_sidebar(), width=2, padx=2, pady=2)
+    self.sidebar_toggle_btn.pack(side="right")
+
+    self.sidebar_title_label = tk.Label(self.sidebar_frame, text="Module", bg=BG, fg=TEXT, font=("Segoe UI", 14, "bold"))
+    self.sidebar_title_label.pack(anchor="w", padx=18, pady=(8, 10))
+    self.sidebar_subtitle_label = tk.Label(self.sidebar_frame, text="Finance-Mate-Startnavigation", bg=BG, fg=TEXT2, font=("Segoe UI", 9))
+    self.sidebar_subtitle_label.pack(anchor="w", padx=18, pady=(0, 12))
+
+    self.nav_buttons = {}
+    for module_name in self.nav_order:
+        btn = ttk.Button(self.sidebar_frame, text=module_name, style="Nav.TButton", command=lambda value=module_name: self.show_module(value))
+        btn.pack(fill="x", padx=14, pady=4)
+        self.nav_buttons[module_name] = btn
+
+    self._apply_sidebar_state()
+
+
+FinanceMateApp._build_sidebar = _patched_build_sidebar_v612
+
+
+_prev_journal_build_ui_v612 = JournalView._build_ui
+
+
+def _patched_journal_build_ui_v612(self) -> None:
+    _prev_journal_build_ui_v612(self)
+    shell = _find_module_shell(self)
+    if shell is not None:
+        children = _grid_children_sorted(shell)
+        if len(children) >= 2:
+            attach_grid_splitter(shell, children[0], children[1], "Finanzbuchhaltung")
+    _remove_label_by_prefix(self, ("Rechtsklick auf eine Position erlaubt",))
+
+
+JournalView._build_ui = _patched_journal_build_ui_v612
+
+
+def _patched_debitors_reload_invoices_v612(self) -> None:
+    for item in self.invoice_tree.get_children():
+        self.invoice_tree.delete(item)
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT invoice_no, customer_name AS partner_name, invoice_date, due_date, posting_text, amount, status FROM customer_invoices ORDER BY id DESC LIMIT 200").fetchall()
+    finally:
+        conn.close()
+    for row in rows:
+        count = self.get_attachment_count(self.entity_type, row['invoice_no'])
+        open_amount = 0 if row['status'] == STATUS_PAID else row['amount']
+        _prio, tag, due_text = urgency_bucket(row['due_date'], row['status'], open_amount)
+        self.invoice_tree.insert('', 'end', values=(row['invoice_no'], row['partner_name'], row['invoice_date'], due_text, row['posting_text'], format_amount(row['amount']), row['status'], attachment_text(count)), tags=(tag,))
+
+
+DebitorsView.reload_invoices = _patched_debitors_reload_invoices_v612
+
+
+def _patched_debitors_reload_open_items_v612(self) -> None:
+    for item in self.open_item_tree.get_children():
+        self.open_item_tree.delete(item)
+    conn = get_connection()
+    try:
+        rows = conn.execute("SELECT reference_no, partner_name, invoice_date, due_date, amount, open_amount, status FROM open_items WHERE item_type = ? ORDER BY id DESC LIMIT 200", (self.open_item_type,)).fetchall()
+    finally:
+        conn.close()
+    decorated = []
+    for row in rows:
+        prio, tag, due_text = urgency_bucket(row['due_date'], row['status'], row['open_amount'])
+        decorated.append((prio, row, tag, due_text))
+    decorated.sort(key=lambda x: x[0])
+    for _prio, row, tag, due_text in decorated:
+        status = compute_status_from_open_amount(row['amount'], row['open_amount'], row['due_date']) if row['status'] != STATUS_STORNO else STATUS_STORNO
+        count = self.get_attachment_count(self.entity_type, row['reference_no'])
+        self.open_item_tree.insert('', 'end', values=(row['reference_no'], row['partner_name'], row['invoice_date'], due_text, format_amount(row['amount']), format_amount(row['open_amount']), status, attachment_text(count)), tags=(tag,))
+
+
+DebitorsView.reload_open_items = _patched_debitors_reload_open_items_v612
+
+
+def _patched_debitors_build_ui_v612(self) -> None:
+    self.grid_rowconfigure(2, weight=1)
+    self.grid_columnconfigure(0, weight=1)
+    ttk.Label(self, text=self.invoice_title, style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
+    ttk.Label(self, text=self.block_hint, style="Hint.TLabel", wraplength=1050, justify="left").grid(row=1, column=0, sticky="w", pady=(0, 12))
+
+    shell = tk.Frame(self, bg=BG)
+    shell.grid(row=2, column=0, sticky="nsew")
+    shell.grid_rowconfigure(0, weight=1)
+    shell.grid_columnconfigure(0, weight=0)
+    shell.grid_columnconfigure(1, weight=1)
+
+    left_outer = tk.Frame(shell, bg=CARD_BORDER)
+    left_outer.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    left = tk.Frame(left_outer, bg=WHITE)
+    left.pack(fill="both", expand=True, padx=1, pady=1)
+    left.grid_columnconfigure(0, weight=1)
+    left.grid_rowconfigure(3, weight=1)
+    left.grid_rowconfigure(5, weight=1)
+
+    right_outer = tk.Frame(shell, bg=CARD_BORDER)
+    right_outer.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+    right = tk.Frame(right_outer, bg=WHITE)
+    right.pack(fill="both", expand=True, padx=1, pady=1)
+    right.grid_columnconfigure(0, weight=1)
+    right.grid_rowconfigure(1, weight=1)
+
+    form_outer = tk.Frame(left, bg=CARD_BORDER)
+    form_outer.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+    form_scroll = ScrollableFrame(form_outer)
+    form_scroll.pack(fill="both", expand=True, padx=1, pady=1)
+    form = form_scroll.content
+    for idx in range(4):
+        form.grid_columnconfigure(idx, weight=1)
+
+    self.invoice_no_var = tk.StringVar(value=self._generate_invoice_no())
+    self.invoice_date_var = tk.StringVar(value=datetime.now().strftime(DATE_FMT))
+    self.posting_text_var = tk.StringVar()
+    self.amount_var = tk.StringVar()
+    self.due_date_var = tk.StringVar(value=datetime.now().strftime(DATE_FMT))
+    self.partner_var = tk.StringVar(value=self.partner_choices[0] if self.partner_choices else "")
+    self.payment_term_var = tk.StringVar(value=self.payment_term_choices[0] if self.payment_term_choices else "")
+    self.tax_code_var = tk.StringVar(value=self.tax_code_choices[0] if self.tax_code_choices else "")
+
+    self._labeled_entry(form, 0, 0, "Rechnungsnummer", self.invoice_no_var)
+    self._labeled_entry(form, 0, 1, "Rechnungsdatum", self.invoice_date_var)
+    self._labeled_entry(form, 0, 2, "Fälligkeitsdatum", self.due_date_var)
+    self._labeled_combo(form, 0, 3, self.partner_label, self.partner_var, self.partner_choices, width=42)
+    self._labeled_combo(form, 1, 0, "Zahlungsbedingung", self.payment_term_var, self.payment_term_choices, width=42)
+    self._labeled_combo(form, 1, 1, "Steuerkennzeichen", self.tax_code_var, self.tax_code_choices, width=42)
+    self._labeled_entry(form, 1, 2, "Betrag", self.amount_var)
+    self._labeled_entry(form, 1, 3, "Buchungstext", self.posting_text_var)
+
+    action_row = tk.Frame(left, bg=WHITE)
+    action_row.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
+    self.attach_icon = load_button_icon(ATTACH_BUTTON_ICON_PATH)
+    add_attach_btn = ttk.Button(action_row, text=self.attachment_add_label, style="Confirm.TButton", command=self.add_pending_attachments)
+    if self.attach_icon is not None:
+        add_attach_btn.configure(image=self.attach_icon, compound="left")
+    add_attach_btn.pack(side="left")
+    create_standard_button(action_row, "Fälligkeit nach Zahlungsbedingung berechnen", command=self.apply_payment_term).pack(side="left", padx=(8, 0))
+    ttk.Button(action_row, text="Rechnung speichern", style="Confirm.TButton", command=self.save_invoice).pack(side="left", padx=(8, 0))
+    create_standard_button(action_row, "Felder leeren", command=self.clear_form).pack(side="left", padx=(8, 0))
+
+    tk.Label(left, text="Ausgangsrechnungen (alle Status)", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 8))
+    inv_outer = tk.Frame(left, bg=CARD_BORDER)
+    inv_outer.grid(row=3, column=0, sticky="nsew", padx=16, pady=(0, 12))
+    inv_inner = tk.Frame(inv_outer, bg=WHITE)
+    inv_inner.pack(fill="both", expand=True, padx=1, pady=1)
+    inv_inner.grid_rowconfigure(0, weight=1)
+    inv_inner.grid_columnconfigure(0, weight=1)
+    self.invoice_tree = ttk.Treeview(inv_inner, columns=("invoice_no", "partner_name", "invoice_date", "due_date", "posting_text", "amount", "status", "attachments"), show="headings", height=10)
+    self.invoice_tree.grid(row=0, column=0, sticky="nsew")
+    inv_scroll = ttk.Scrollbar(inv_inner, orient="vertical", command=self.invoice_tree.yview)
+    inv_scroll.grid(row=0, column=1, sticky="ns")
+    self.invoice_tree.configure(yscrollcommand=inv_scroll.set)
+    for key, title, width in [("invoice_no", "Referenz", 110), ("partner_name", self.partner_label, 175), ("invoice_date", "Datum", 82), ("due_date", "Fälligkeit", 92), ("posting_text", "Buchungstext", 210), ("amount", "Re.-Betrag", 90), ("status", "Status", 95), ("attachments", "Belege", 150)]:
+        self.invoice_tree.heading(key, text=title)
+        self.invoice_tree.column(key, width=width, anchor="w")
+    self.setup_sorting(self.invoice_tree)
+    configure_tree_tags(self.invoice_tree)
+    self.invoice_tree.bind("<Button-3>", self._show_invoice_context_menu)
+    self.invoice_tree.bind("<Button-1>", self._on_invoice_click)
+
+    tk.Label(left, text="Offene Posten Debitoren", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).grid(row=4, column=0, sticky="w", padx=16, pady=(0, 8))
+    op_outer = tk.Frame(left, bg=CARD_BORDER)
+    op_outer.grid(row=5, column=0, sticky="nsew", padx=16, pady=(0, 16))
+    op_inner = tk.Frame(op_outer, bg=WHITE)
+    op_inner.pack(fill="both", expand=True, padx=1, pady=1)
+    op_inner.grid_rowconfigure(0, weight=1)
+    op_inner.grid_columnconfigure(0, weight=1)
+    self.open_item_tree = ttk.Treeview(op_inner, columns=("reference_no", "partner_name", "invoice_date", "due_date", "amount", "open_amount", "status", "attachments"), show="headings", height=10)
+    self.open_item_tree.grid(row=0, column=0, sticky="nsew")
+    op_scroll = ttk.Scrollbar(op_inner, orient="vertical", command=self.open_item_tree.yview)
+    op_scroll.grid(row=0, column=1, sticky="ns")
+    self.open_item_tree.configure(yscrollcommand=op_scroll.set)
+    for key, title, width in [("reference_no", "Referenz", 100), ("partner_name", self.partner_label, 160), ("invoice_date", "Datum", 80), ("due_date", "Fälligkeit", 92), ("amount", "Re.-Betrag", 90), ("open_amount", "Offen", 90), ("status", "Status", 95), ("attachments", "Belege", 150)]:
+        self.open_item_tree.heading(key, text=title)
+        self.open_item_tree.column(key, width=width, anchor="w")
+    self.setup_sorting(self.open_item_tree)
+    configure_tree_tags(self.open_item_tree)
+
+    tk.Label(right, text=self.hint_title, bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w", padx=16, pady=(16, 12))
+    details_outer = tk.Frame(right, bg=CARD_BORDER)
+    details_outer.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
+    details_inner = tk.Frame(details_outer, bg=WHITE)
+    details_inner.pack(fill="both", expand=True, padx=1, pady=1)
+    details_inner.grid_columnconfigure(0, weight=1)
+    infolist = [f"{self.partner_label} muss als aktiver Stammdatensatz vorhanden sein.", "Rechnungsdatum und Fälligkeit müssen TT.MM.JJJJ sein.", "Buchungstexte werden in den Rechnungsübersichten angezeigt.", "Offene Posten > 14 Tage nach Fälligkeit erhalten ein Warnsymbol am Datum.", "Eigene Sortierung ist global über Spaltenüberschriften möglich."]
+    for idx, item in enumerate(infolist):
+        row = tk.Frame(details_inner, bg=WHITE)
+        row.grid(row=idx, column=0, sticky="ew", padx=14, pady=(12 if idx == 0 else 6, 0))
+        tk.Label(row, text="•", bg=WHITE, fg=BLUE, font=("Segoe UI", 11, "bold")).pack(side="left")
+        tk.Label(row, text=item, bg=WHITE, fg=TEXT, font=("Segoe UI", 9), wraplength=330, justify="left").pack(side="left", padx=(8, 0))
+
+    self.invoice_menu = tk.Menu(self, tearoff=0)
+    self.invoice_menu.add_command(label="Rechnungsbeleg hinzufügen", command=self.add_attachment_to_selected_invoice)
+    attach_grid_splitter(shell, left_outer, right_outer, "Debitoren")
+
+
+DebitorsView._build_ui = _patched_debitors_build_ui_v612
+
+
+_prev_creditors_build_ui_v612 = CreditorsView._build_ui
+
+
+def _patched_creditors_build_ui_v612(self) -> None:
+    _prev_creditors_build_ui_v612(self)
+    shell = _find_module_shell(self)
+    if shell is not None:
+        children = _grid_children_sorted(shell)
+        if len(children) >= 2:
+            attach_grid_splitter(shell, children[0], children[1], "Kreditoren")
+
+
+CreditorsView._build_ui = _patched_creditors_build_ui_v612
+
+
+def _build_stammdaten_form_panel_v612(self, tab_name: str, parent: tk.Frame) -> None:
+    parent.grid_rowconfigure(0, weight=1)
+    parent.grid_columnconfigure(0, weight=1)
+    form_outer = tk.Frame(parent, bg=CARD_BORDER)
+    form_outer.grid(row=0, column=0, sticky="nsew")
+    form_scroll = ScrollableFrame(form_outer)
+    form_scroll.pack(fill="both", expand=True, padx=1, pady=1)
+    form_scroll.canvas.configure(height=480)
+    form_body = form_scroll.content
+    tk.Label(form_body, text="Eintrag anlegen / bearbeiten", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=16, pady=(12, 8))
+    mode_label = tk.Label(form_body, text="Modus: Neuer Eintrag", bg=WHITE, fg=TEXT2, font=("Segoe UI", 9), justify="left")
+    mode_label.pack(anchor="w", padx=16, pady=(0, 8))
+    self.mode_labels[tab_name] = mode_label
+
+    field_widgets: Dict[str, tk.Widget] = {}
+    for field_key, label_text, field_type, *rest in self.tab_configs[tab_name]["form_fields"]:
+        row = tk.Frame(form_body, bg=WHITE)
+        row.pack(fill="x", padx=16, pady=5)
+        tk.Label(row, text=label_text, bg=WHITE, fg=TEXT, font=("Segoe UI", 9, "bold")).pack(anchor="w")
+        if field_type == "combo":
+            values = rest[0] if rest else []
+            widget = ttk.Combobox(row, values=values, state="readonly")
+            if field_key == "country_code":
+                widget.set("DE")
+            elif values:
+                widget.set(values[0])
+            widget.bind("<MouseWheel>", lambda e, sf=form_scroll: (sf._on_mousewheel(e), "break")[1], add="+")
+            widget.bind("<Button-4>", lambda e, sf=form_scroll: (sf._on_mousewheel(e), "break")[1], add="+")
+            widget.bind("<Button-5>", lambda e, sf=form_scroll: (sf._on_mousewheel(e), "break")[1], add="+")
+        else:
+            widget = ttk.Entry(row)
+            widget.bind("<MouseWheel>", lambda e, sf=form_scroll: sf._on_mousewheel(e), add="+")
+            widget.bind("<Button-4>", lambda e, sf=form_scroll: sf._on_mousewheel(e), add="+")
+            widget.bind("<Button-5>", lambda e, sf=form_scroll: sf._on_mousewheel(e), add="+")
+        widget.pack(fill="x", pady=(4, 0))
+        field_widgets[field_key] = widget
+
+    button_row = tk.Frame(form_body, bg=WHITE)
+    button_row.pack(fill="x", padx=16, pady=(12, 16))
+    ttk.Button(button_row, text="Speichern / Aktualisieren", style="Confirm.TButton", command=lambda name=tab_name: self.save_record(name)).pack(side="left")
+    create_standard_button(button_row, "Felder leeren", command=lambda name=tab_name: self.clear_form(name)).pack(side="left", padx=(8, 0))
+    create_standard_button(button_row, "Löschen", command=lambda name=tab_name: self.delete_record(name)).pack(side="left", padx=(8, 0))
+    self.forms[tab_name] = field_widgets
+
+
+StammdatenView._build_form_panel_v612 = _build_stammdaten_form_panel_v612
+
+
+def _build_stammdaten_left_tab_v612(self, tab_name: str, parent: tk.Frame) -> None:
+    parent.grid_rowconfigure(1, weight=1)
+    parent.grid_columnconfigure(0, weight=1)
+    toolbar = tk.Frame(parent, bg=WHITE)
+    toolbar.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 10))
+    toolbar.grid_columnconfigure(1, weight=1)
+    tk.Label(toolbar, text=f"{tab_name} verwalten", bg=WHITE, fg=TEXT, font=("Segoe UI", 13, "bold")).grid(row=0, column=0, sticky="w")
+    search_var = tk.StringVar()
+    self.search_vars[tab_name] = search_var
+    search_entry = tk.Entry(toolbar, textvariable=search_var, relief="solid", bd=1, fg=TEXT)
+    search_entry.grid(row=0, column=1, sticky="e", padx=(16, 6), ipady=3)
+    apply_search_placeholder(search_entry, PLACEHOLDER_TEXT)
+    search_entry.bind("<KeyRelease>", lambda _event, name=tab_name: self.load_table_data(name))
+    create_standard_button(toolbar, "Daten-Refresh", command=lambda name=tab_name: self.load_table_data(name)).grid(row=0, column=2, sticky="e")
+
+    tree = self._create_treeview(parent, tab_name)
+    self.trees[tab_name] = tree
+    tree.bind("<<TreeviewSelect>>", lambda _event, name=tab_name: self.load_selected_record(name))
+    self.setup_sorting(tree)
+
+
+StammdatenView._build_left_tab_v612 = _build_stammdaten_left_tab_v612
+
+
+def _patched_stammdaten_on_tab_changed_v612(self, _event=None) -> None:
+    selected_index = self.notebook.index(self.notebook.select())
+    ordered_tabs = list(self.tab_configs.keys())
+    self.current_tab = ordered_tabs[selected_index]
+    if hasattr(self, "form_panels") and self.current_tab in self.form_panels:
+        self.form_panels[self.current_tab].tkraise()
+    self.status_callback(f"Stammdaten geöffnet: {self.current_tab}")
+    self.load_table_data(self.current_tab)
+    self.clear_form(self.current_tab)
+
+
+StammdatenView._on_tab_changed = _patched_stammdaten_on_tab_changed_v612
+
+
+def _patched_stammdaten_build_ui_v612(self) -> None:
+    self.grid_rowconfigure(2, weight=1)
+    self.grid_columnconfigure(0, weight=1)
+    ttk.Label(self, text="Stammdaten", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
+    ttk.Label(self, text="Stammdaten mit scrollbaren Bearbeitungsformularen, Länderdropdown, optionalen Feldern und globaler Sortierlogik per Klick auf Spaltentitel.", style="Hint.TLabel", wraplength=1080, justify="left").grid(row=1, column=0, sticky="w", pady=(0, 12))
+
+    shell = tk.Frame(self, bg=BG)
+    shell.grid(row=2, column=0, sticky="nsew")
+    shell.grid_rowconfigure(0, weight=1)
+    shell.grid_columnconfigure(0, weight=0)
+    shell.grid_columnconfigure(1, weight=1)
+
+    left_outer = tk.Frame(shell, bg=CARD_BORDER)
+    left_outer.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    left_body = tk.Frame(left_outer, bg=WHITE)
+    left_body.pack(fill="both", expand=True, padx=1, pady=1)
+    left_body.grid_rowconfigure(0, weight=1)
+    left_body.grid_columnconfigure(0, weight=1)
+
+    right_outer = tk.Frame(shell, bg=CARD_BORDER)
+    right_outer.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+    right_body = tk.Frame(right_outer, bg=WHITE)
+    right_body.pack(fill="both", expand=True, padx=1, pady=1)
+    right_body.grid_rowconfigure(0, weight=1)
+    right_body.grid_columnconfigure(0, weight=1)
+
+    notebook = ttk.Notebook(left_body)
+    notebook.grid(row=0, column=0, sticky="nsew", padx=14, pady=14)
+    notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+    self.notebook = notebook
+    self.form_panels = {}
+
+    for tab_name in self.tab_configs:
+        tab = tk.Frame(notebook, bg=WHITE)
+        notebook.add(tab, text=tab_name)
+        self._build_left_tab_v612(tab_name, tab)
+        panel = tk.Frame(right_body, bg=WHITE)
+        panel.grid(row=0, column=0, sticky="nsew", padx=14, pady=14)
+        self.form_panels[tab_name] = panel
+        self._build_form_panel_v612(tab_name, panel)
+        self.edit_ids[tab_name] = None
+
+    attach_grid_splitter(shell, left_outer, right_outer, "Stammdaten", default_ratio=0.56)
+    self.current_tab = list(self.tab_configs.keys())[0]
+    self.form_panels[self.current_tab].tkraise()
+
+
+StammdatenView._build_ui = _patched_stammdaten_build_ui_v612
+
+
 def main() -> None:
     ensure_directories()
     init_sqlite()
