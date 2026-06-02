@@ -15,7 +15,7 @@ except Exception:
     PIL_AVAILABLE = False
 
 APP_NAME = "Finance Mate"
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "data" / "finance_mate.db"
 ASSETS_DIR = BASE_DIR / "assets"
@@ -47,6 +47,8 @@ SIDEBAR_WIDTH = 265
 WINDOW_WIDTH = 1440
 WINDOW_HEIGHT = 900
 DATE_FMT = "%d.%m.%Y"
+POPUP_MIN_W = 1000
+POPUP_MIN_H = 700
 
 STATUS_OPEN = "Offen"
 STATUS_PARTIAL = "Teilbezahlt"
@@ -199,7 +201,34 @@ def configure_tree_tags(tree: ttk.Treeview) -> None:
 
 
 def attachment_text(count: int) -> str:
-    return f"{count} 📄" if count > 0 else "0"
+    return f"0 Belege hinzufügen" if count <= 0 else f"{count} Belege hinzufügen/ändern"
+
+
+def generate_number(counter_key: str, prefix: str) -> str:
+    conn = get_connection()
+    try:
+        current = conn.execute("SELECT value FROM app_meta WHERE key = ?", (counter_key,)).fetchone()
+        current_val = int(current["value"]) if current else 0
+        next_val = current_val + 1
+        conn.execute("INSERT INTO app_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", (counter_key, str(next_val)))
+        conn.commit()
+        return f"{prefix}{next_val:06d}"
+    finally:
+        conn.close()
+
+
+def compute_status_from_open_amount(amount: float, open_amount: float, due_date: str) -> str:
+    if float(open_amount) <= 0:
+        return STATUS_PAID
+    if float(open_amount) < float(amount):
+        return STATUS_PARTIAL
+    try:
+        due = datetime.strptime(due_date, DATE_FMT).date()
+        if due < datetime.now().date():
+            return STATUS_OVERDUE
+    except Exception:
+        pass
+    return STATUS_OPEN
 
 
 def load_button_icon(path: Path, size: int = 16):
@@ -229,6 +258,9 @@ def init_sqlite() -> None:
             "INSERT OR IGNORE INTO app_meta(key, value) VALUES (?, ?)",
             ("app_version", APP_VERSION),
         )
+        cur.execute("INSERT OR IGNORE INTO app_meta(key, value) VALUES (?, ?)", ("journal_counter", "0"))
+        cur.execute("INSERT OR IGNORE INTO app_meta(key, value) VALUES (?, ?)", ("customer_invoice_counter", "0"))
+        cur.execute("INSERT OR IGNORE INTO app_meta(key, value) VALUES (?, ?)", ("vendor_invoice_counter", "0"))
 
         cur.execute(
             """
@@ -335,7 +367,8 @@ def init_sqlite() -> None:
                 tax_code TEXT,
                 payment_term_code TEXT,
                 status TEXT NOT NULL DEFAULT 'Offen',
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                linked_journal_no TEXT DEFAULT ''
             )
             """
         )
@@ -353,7 +386,8 @@ def init_sqlite() -> None:
                 tax_code TEXT,
                 payment_term_code TEXT,
                 status TEXT NOT NULL DEFAULT 'Offen',
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                linked_journal_no TEXT DEFAULT ''
             )
             """
         )
@@ -370,7 +404,8 @@ def init_sqlite() -> None:
                 amount REAL NOT NULL,
                 open_amount REAL NOT NULL,
                 status TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                linked_journal_no TEXT DEFAULT ''
             )
             """
         )
@@ -398,6 +433,9 @@ def init_sqlite() -> None:
         ensure_column(conn, "tax_codes", "tax_scope", "TEXT DEFAULT 'A'")
         ensure_column(conn, "customer_invoices", "customer_address", "TEXT DEFAULT ''")
         ensure_column(conn, "vendor_invoices", "vendor_address", "TEXT DEFAULT ''")
+        ensure_column(conn, "open_items", "linked_journal_no", "TEXT DEFAULT ''")
+        ensure_column(conn, "customer_invoices", "linked_journal_no", "TEXT DEFAULT ''")
+        ensure_column(conn, "vendor_invoices", "linked_journal_no", "TEXT DEFAULT ''")
 
         conn.commit()
     finally:
@@ -416,6 +454,31 @@ class ScrollableFrame(ttk.Frame):
         self.canvas.configure(yscrollcommand=self.v_scroll.set)
         self.canvas.pack(side="left", fill="both", expand=True)
         self.v_scroll.pack(side="right", fill="y")
+        self.canvas.bind("<Enter>", self._bind_mousewheel)
+        self.canvas.bind("<Leave>", self._unbind_mousewheel)
+        self.content.bind("<Enter>", self._bind_mousewheel)
+        self.content.bind("<Leave>", self._unbind_mousewheel)
+
+    def _on_mousewheel(self, event):
+        delta = 0
+        if hasattr(event, 'delta') and event.delta:
+            delta = int(-1 * (event.delta / 120))
+        elif getattr(event, 'num', None) == 4:
+            delta = -1
+        elif getattr(event, 'num', None) == 5:
+            delta = 1
+        if delta != 0:
+            self.canvas.yview_scroll(delta, "units")
+
+    def _bind_mousewheel(self, _event=None):
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+    def _unbind_mousewheel(self, _event=None):
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
 
 
 class SortableTreeMixin:
@@ -491,10 +554,11 @@ class AttachmentMixin:
         rows = self.get_attachments(entity_type, reference_no)
         popup = tk.Toplevel(parent)
         popup.title(f"Anhänge - {reference_no}")
-        popup.geometry("560x360")
+        popup.geometry(f"{POPUP_MIN_W}x{POPUP_MIN_H}")
+        popup.minsize(POPUP_MIN_W, POPUP_MIN_H)
         popup.configure(bg=WHITE)
         tk.Label(popup, text=f"Anhänge zu {reference_no}", bg=WHITE, fg=TEXT, font=("Segoe UI", 12, "bold")).pack(anchor="w", padx=14, pady=(14, 6))
-        tk.Label(popup, text="Doppelklick auf einen Dateipfad ist derzeit nicht aktiv. Die Übersicht dient der Kontrolle der angehängten Dateien.", bg=WHITE, fg=TEXT2, font=("Segoe UI", 9), wraplength=520, justify="left").pack(anchor="w", padx=14, pady=(0, 8))
+        tk.Label(popup, text="Doppelklick auf einen Dateipfad ist derzeit nicht aktiv. Die Übersicht dient der Kontrolle der angehängten Dateien.", bg=WHITE, fg=TEXT2, font=("Segoe UI", 9), wraplength=960, justify="left").pack(anchor="w", padx=14, pady=(0, 8))
 
         frame = tk.Frame(popup, bg=CARD_BORDER)
         frame.pack(fill="both", expand=True, padx=14, pady=(0, 14))
@@ -507,7 +571,7 @@ class AttachmentMixin:
         scroll = ttk.Scrollbar(inner, orient="vertical", command=tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         tree.configure(yscrollcommand=scroll.set)
-        for key, title, width in [("file_name", "Dateiname", 180), ("file_path", "Pfad", 260), ("created_at", "Hinzugefügt", 110)]:
+        for key, title, width in [("file_name", "Dateiname", 220), ("file_path", "Pfad", 560), ("created_at", "Hinzugefügt", 160)]:
             tree.heading(key, text=title)
             tree.column(key, width=width, anchor="w")
         for row in rows:
@@ -1092,7 +1156,7 @@ class JournalView(tk.Frame, SortableTreeMixin, AttachmentMixin):
         self.history_tree.configure(yscrollcommand=history_scroll.set)
         for key, title, width in [
             ("document_no", "Beleg", 120), ("booking_date", "Datum", 90), ("posting_text", "Buchungstext", 180),
-            ("total_debit", "Summe", 90), ("line_count", "Zeilen", 70), ("attachments", "Belege", 90),
+            ("total_debit", "Summe", 90), ("line_count", "Zeilen", 70), ("attachments", "Belege", 170),
         ]:
             self.history_tree.heading(key, text=title)
             self.history_tree.column(key, width=width, anchor="w")
@@ -1119,7 +1183,7 @@ class JournalView(tk.Frame, SortableTreeMixin, AttachmentMixin):
             combo.set(values[0])
 
     def _generate_document_no(self) -> str:
-        return "FM-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        return generate_number("journal_counter", "FM-")
 
     def clear_line_inputs(self) -> None:
         self.line_text_var.set("")
@@ -1373,8 +1437,11 @@ class InvoiceModuleBase(tk.Frame, SortableTreeMixin, AttachmentMixin):
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(2, weight=1)
 
-        form = tk.Frame(left, bg=WHITE)
-        form.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+        form_outer = tk.Frame(left, bg=CARD_BORDER)
+        form_outer.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+        form_scroll = ScrollableFrame(form_outer)
+        form_scroll.pack(fill="both", expand=True, padx=1, pady=1)
+        form = form_scroll.content
         for idx in range(4):
             form.grid_columnconfigure(idx, weight=1)
 
@@ -1424,7 +1491,7 @@ class InvoiceModuleBase(tk.Frame, SortableTreeMixin, AttachmentMixin):
         for key, title, width in [
             ("invoice_no", "Rechnung", 120), ("partner_name", self.partner_label, 180), ("invoice_date", "Datum", 85),
             ("due_date", "Fälligkeit", 92), ("posting_text", "Buchungstext", 180), ("amount", "Betrag", 90),
-            ("status", "Status", 95), ("attachments", "Belege", 90),
+            ("status", "Status", 95), ("attachments", "Belege", 170),
         ]:
             self.invoice_tree.heading(key, text=title)
             self.invoice_tree.column(key, width=width, anchor="w")
@@ -1569,7 +1636,7 @@ class InvoiceModuleBase(tk.Frame, SortableTreeMixin, AttachmentMixin):
                     (invoice_no, partner["partner_no"], partner["name"], invoice_date, due_date, posting_text, amount, tax_code, payment_term_code, STATUS_OPEN, datetime.now().strftime("%d.%m.%Y %H:%M:%S"), partner["address"]),
                 )
                 cur.execute(
-                    "INSERT INTO open_items (item_type, reference_no, partner_no, partner_name, invoice_date, due_date, amount, open_amount, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO open_items (item_type, reference_no, partner_no, partner_name, invoice_date, due_date, amount, open_amount, status, created_at, linked_journal_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (self.open_item_type, invoice_no, partner["partner_no"], partner["name"], invoice_date, due_date, amount, amount, STATUS_OPEN, datetime.now().strftime("%d.%m.%Y %H:%M:%S")),
                 )
                 conn.commit()
