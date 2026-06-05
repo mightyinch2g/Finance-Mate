@@ -1,3 +1,4 @@
+# Ground-up rebuild candidate based on current functional stand with rebuilt place-based splitter render subsystem.
 
 import os
 import tkinter as tk
@@ -6715,6 +6716,844 @@ def _patched_stammdaten_build_ui_v613(self) -> None:
 
 
 StammdatenView._build_ui = _patched_stammdaten_build_ui_v613
+
+
+
+# === FINANCE MATE PATCH V0_6_14 ===
+APP_VERSION = "0.6.14"
+SIDEBAR_COLLAPSED_WIDTH = 52
+
+
+def _toggle_sidebar_v614(self):
+    self.sidebar_expanded = not getattr(self, "sidebar_expanded", True)
+    save_ui_preference("sidebar", "expanded", "1" if self.sidebar_expanded else "0")
+    self._apply_sidebar_state()
+
+
+FinanceMateApp.toggle_sidebar = _toggle_sidebar_v614
+
+
+def _apply_sidebar_state_v614(self):
+    expanded = getattr(self, "sidebar_expanded", True)
+    self.sidebar_frame.configure(width=SIDEBAR_EXPANDED_WIDTH if expanded else SIDEBAR_COLLAPSED_WIDTH)
+    self.sidebar_toggle_btn.configure(text="◀" if expanded else "▶")
+    try:
+        self.sidebar_toggle_btn.pack_forget()
+    except Exception:
+        pass
+    if expanded:
+        self.sidebar_toggle_btn.pack(side="right")
+        if not self.sidebar_title_label.winfo_manager():
+            self.sidebar_title_label.pack(anchor="w", padx=18, pady=(8, 10))
+        if not self.sidebar_subtitle_label.winfo_manager():
+            self.sidebar_subtitle_label.pack(anchor="w", padx=18, pady=(0, 12))
+        if not self.sidebar_nav_container.winfo_manager():
+            self.sidebar_nav_container.pack(fill="both", expand=True)
+    else:
+        self.sidebar_toggle_btn.pack(anchor="center")
+        self.sidebar_title_label.pack_forget()
+        self.sidebar_subtitle_label.pack_forget()
+        self.sidebar_nav_container.pack_forget()
+    self.sidebar_frame.update_idletasks()
+
+
+FinanceMateApp._apply_sidebar_state = _apply_sidebar_state_v614
+
+
+def _patched_build_sidebar_v614(self) -> None:
+    self.sidebar_frame = tk.Frame(self, bg=BG, width=SIDEBAR_EXPANDED_WIDTH, highlightthickness=1, highlightbackground=LINE)
+    self.sidebar_frame.grid(row=1, column=0, sticky="nsew")
+    self.sidebar_frame.grid_propagate(False)
+    head = tk.Frame(self.sidebar_frame, bg=BG)
+    head.pack(fill="x", padx=4, pady=(6, 6))
+    self.sidebar_toggle_btn = create_standard_button(head, "◀", command=lambda s=self: s.toggle_sidebar(), width=2, padx=2, pady=2)
+    self.sidebar_toggle_btn.pack(side="right")
+    self.sidebar_title_label = tk.Label(self.sidebar_frame, text="Module", bg=BG, fg=TEXT, font=("Segoe UI", 14, "bold"))
+    self.sidebar_title_label.pack(anchor="w", padx=18, pady=(8, 10))
+    self.sidebar_subtitle_label = tk.Label(self.sidebar_frame, text="Finance-Mate-Startnavigation", bg=BG, fg=TEXT2, font=("Segoe UI", 9))
+    self.sidebar_subtitle_label.pack(anchor="w", padx=18, pady=(0, 12))
+    self.sidebar_nav_container = tk.Frame(self.sidebar_frame, bg=BG)
+    self.sidebar_nav_container.pack(fill="both", expand=True)
+    self.nav_buttons = {}
+    for module_name in self.nav_order:
+        btn = ttk.Button(self.sidebar_nav_container, text=module_name, style="Nav.TButton", command=lambda value=module_name: self.show_module(value))
+        btn.pack(fill="x", padx=14, pady=4)
+        self.nav_buttons[module_name] = btn
+    self._apply_sidebar_state()
+
+
+FinanceMateApp._build_sidebar = _patched_build_sidebar_v614
+
+
+# === FINANCE MATE PATCH V0_6_15 ===
+APP_VERSION = "0.6.15"
+STANDARD_DESIGN_NAME = "Reliefgrau"
+
+
+def _fm_v615_configure_ttk(self) -> None:
+    _fm_v613_configure_ttk(self)
+    style = ttk.Style(self)
+    try:
+        style.configure(
+            "TNotebook.Tab",
+            padding=(10, 5),
+            font=("Segoe UI", 9, "bold"),
+            background=STANDARD_BUTTON_BG,
+            foreground=TEXT,
+            borderwidth=1,
+            relief="raised",
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", "#D3D0C8"), ("active", "#D3D0C8")],
+            relief=[("selected", "sunken"), ("active", "raised")],
+            foreground=[("selected", TEXT), ("active", TEXT)],
+        )
+    except Exception:
+        pass
+    try:
+        style.configure(
+            "TCombobox",
+            arrowsize=14,
+            foreground=TEXT,
+            fieldbackground=WHITE,
+            background=STANDARD_BUTTON_BG,
+            bordercolor=STANDARD_BUTTON_BORDER,
+            lightcolor="#D3D0C8",
+            darkcolor=STANDARD_BUTTON_BORDER,
+            arrowcolor=TEXT,
+            relief="raised",
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", WHITE)],
+            background=[("readonly", STANDARD_BUTTON_BG), ("active", "#D3D0C8")],
+            foreground=[("readonly", TEXT)],
+        )
+    except Exception:
+        pass
+    try:
+        style.configure(
+            "Vertical.TScrollbar",
+            arrowsize=14,
+            borderwidth=1,
+            relief="raised",
+            background=STANDARD_BUTTON_BG,
+            troughcolor="#F3F3F3",
+            bordercolor=STANDARD_BUTTON_BORDER,
+            arrowcolor=TEXT,
+            darkcolor=STANDARD_BUTTON_BORDER,
+            lightcolor="#D3D0C8",
+        )
+        style.map(
+            "Vertical.TScrollbar",
+            background=[("active", "#D3D0C8"), ("pressed", "#C9C6BD")],
+            relief=[("pressed", "sunken"), ("active", "raised")],
+        )
+    except Exception:
+        pass
+
+
+FinanceMateApp._configure_ttk = _fm_v615_configure_ttk
+
+
+def attach_grid_splitter(container: tk.Widget, left_widget: tk.Widget, right_widget: tk.Widget, module_key: str, default_ratio: float = 0.60) -> None:
+    if hasattr(container, "_fm_splitter_line"):
+        try:
+            container._fm_splitter_line.destroy()
+        except Exception:
+            pass
+    line = tk.Frame(container, bg=SPLITTER_LINE_BG, cursor="sb_h_double_arrow", width=SPLITTER_WIDTH)
+    container._fm_splitter_line = line
+    gap = 16
+    min_left = 1
+    min_right = 1
+    state = {"left_width": None}
+
+    def available_width() -> int:
+        container.update_idletasks()
+        width = container.winfo_width()
+        if width <= 1:
+            width = max(40, left_widget.winfo_width() + right_widget.winfo_width() + gap)
+        return max(40, width)
+
+    def saved_or_default() -> int:
+        raw = load_ui_preference("splitter", module_key, "")
+        if raw:
+            try:
+                return int(float(raw))
+            except Exception:
+                pass
+        return int(round(available_width() * default_ratio))
+
+    def clamp_left(value: int) -> int:
+        total = available_width()
+        return max(min_left, min(total - min_right, int(value)))
+
+    def force_widget_width(widget: tk.Widget, width: int) -> None:
+        try:
+            widget.grid_propagate(False)
+        except Exception:
+            pass
+        try:
+            widget.configure(width=max(1, width))
+        except Exception:
+            pass
+
+    def apply_left_width(left_width: int | None = None, persist: bool = False) -> None:
+        total = available_width()
+        if left_width is None:
+            left_width = state["left_width"] if state["left_width"] is not None else saved_or_default()
+        left_width = clamp_left(left_width)
+        line_width = SPLITTER_WIDTH
+        right_width = max(min_right, total - left_width - gap)
+        state["left_width"] = left_width
+        container.grid_columnconfigure(0, minsize=left_width, weight=0)
+        container.grid_columnconfigure(1, minsize=line_width, weight=0)
+        container.grid_columnconfigure(2, minsize=right_width, weight=1)
+        try:
+            left_widget.grid_configure(column=0, padx=(0, 8), sticky="nsew")
+            right_widget.grid_configure(column=2, padx=(8, 0), sticky="nsew")
+        except Exception:
+            pass
+        force_widget_width(left_widget, left_width)
+        force_widget_width(right_widget, right_width)
+        container.update_idletasks()
+        x_pos = left_widget.winfo_x() + left_widget.winfo_width() + 8 - int(line_width / 2)
+        line.place(x=max(0, x_pos), y=0, width=line_width, relheight=1.0)
+        line.lift()
+        if persist:
+            save_ui_preference("splitter", module_key, str(left_width))
+
+    def start_drag(_event=None):
+        line.configure(bg=SPLITTER_LINE_ACTIVE)
+
+    def drag(event):
+        x_local = event.x_root - container.winfo_rootx()
+        apply_left_width(x_local - 8)
+
+    def stop_drag(_event=None):
+        line.configure(bg=SPLITTER_LINE_BG)
+        apply_left_width(state.get("left_width"), persist=True)
+
+    line.bind("<ButtonPress-1>", start_drag)
+    line.bind("<B1-Motion>", drag)
+    line.bind("<ButtonRelease-1>", stop_drag)
+    container.bind("<Configure>", lambda _e: apply_left_width(state.get("left_width")), add="+")
+    container.after(120, lambda: apply_left_width())
+
+
+_prev_unlock_module_shell_v615 = _unlock_module_shell
+
+
+def _unlock_module_shell_v615(shell: tk.Widget):
+    children = _prev_unlock_module_shell_v615(shell)
+    for child in children:
+        try:
+            child.grid_propagate(False)
+        except Exception:
+            pass
+    return children
+
+
+_unlock_module_shell = _unlock_module_shell_v615
+
+
+# === FINANCE MATE PATCH V0_6_16 ===
+APP_VERSION = "0.6.16-groundup"
+STANDARD_DESIGN_NAME = "Reliefgrau"
+
+
+def attach_grid_splitter(container: tk.Widget, left_widget: tk.Widget, right_widget: tk.Widget, module_key: str, default_ratio: float = 0.60) -> None:
+    """Freie place()-Splitterlogik ohne harte Block-Mindestbreiten."""
+    old_line = getattr(container, '_fm_free_splitter_line', None)
+    if old_line is not None:
+        try:
+            old_line.destroy()
+        except Exception:
+            pass
+
+    line = tk.Frame(container, bg=SPLITTER_LINE_BG, cursor='sb_h_double_arrow', width=SPLITTER_WIDTH)
+    container._fm_free_splitter_line = line
+    gap = 16
+    state = {'sash_x': None}
+
+    def _available_width() -> int:
+        container.update_idletasks()
+        width = container.winfo_width()
+        if width <= 1:
+            width = max(240, left_widget.winfo_width() + right_widget.winfo_width() + gap)
+        return max(240, width)
+
+    def _available_height() -> int:
+        container.update_idletasks()
+        return max(100, container.winfo_height())
+
+    def _load_default_sash() -> int:
+        raw = load_ui_preference('splitter', module_key, '')
+        if raw:
+            try:
+                return int(float(raw))
+            except Exception:
+                pass
+        return int(round(_available_width() * default_ratio))
+
+    def _clamp_sash(x_pos: int) -> int:
+        total = _available_width()
+        return max(8, min(total - 8, int(x_pos)))
+
+    def _reset_geometry_managers() -> None:
+        for widget in (left_widget, right_widget):
+            try:
+                widget.grid_forget()
+            except Exception:
+                pass
+            try:
+                widget.place_forget()
+            except Exception:
+                pass
+            try:
+                widget.configure(width=1)
+            except Exception:
+                pass
+
+    def _apply(sash_x: int | None = None, persist: bool = False) -> None:
+        _reset_geometry_managers()
+        total_w = _available_width()
+        total_h = _available_height()
+        if sash_x is None:
+            sash_x = state['sash_x'] if state['sash_x'] is not None else _load_default_sash()
+        sash_x = _clamp_sash(sash_x)
+        left_w = max(1, sash_x - gap // 2)
+        right_x = min(total_w - 1, sash_x + gap // 2)
+        right_w = max(1, total_w - right_x)
+        state['sash_x'] = sash_x
+        try:
+            left_widget.place(x=0, y=0, width=left_w, height=total_h)
+        except Exception:
+            pass
+        try:
+            right_widget.place(x=right_x, y=0, width=right_w, height=total_h)
+        except Exception:
+            pass
+        try:
+            line.place(x=max(0, sash_x - SPLITTER_WIDTH // 2), y=0, width=SPLITTER_WIDTH, height=total_h)
+            line.lift()
+        except Exception:
+            pass
+        if persist:
+            save_ui_preference('splitter', module_key, str(sash_x))
+
+    def _drag_start(_event=None):
+        line.configure(bg=SPLITTER_LINE_ACTIVE)
+
+    def _drag(event):
+        x_local = event.x_root - container.winfo_rootx()
+        _apply(x_local)
+
+    def _drag_stop(_event=None):
+        line.configure(bg=SPLITTER_LINE_BG)
+        _apply(state.get('sash_x'), persist=True)
+
+    line.bind('<ButtonPress-1>', _drag_start)
+    line.bind('<B1-Motion>', _drag)
+    line.bind('<ButtonRelease-1>', _drag_stop)
+    container.bind('<Configure>', lambda _e: _apply(state.get('sash_x')), add='+')
+    container.after(120, lambda: _apply())
+
+
+def _find_std_module_shell_children(view: tk.Widget):
+    shell = _find_module_shell(view)
+    if shell is None:
+        return None, None, None
+    children = _grid_children_sorted(shell)
+    if len(children) < 2:
+        frame_children = [child for child in shell.winfo_children() if isinstance(child, tk.Frame)]
+        if len(frame_children) >= 2:
+            children = frame_children
+    if len(children) < 2:
+        return shell, None, None
+    return shell, children[0], children[1]
+
+
+_prev_journal_build_ui_v016 = JournalView._build_ui
+
+def _patched_journal_build_ui_v016(self) -> None:
+    _prev_journal_build_ui_v016(self)
+    shell, left_outer, right_outer = _find_std_module_shell_children(self)
+    if shell is not None and left_outer is not None and right_outer is not None:
+        attach_grid_splitter(shell, left_outer, right_outer, 'Finanzbuchhaltung')
+
+
+JournalView._build_ui = _patched_journal_build_ui_v016
+
+
+_prev_debitors_build_ui_v016 = DebitorsView._build_ui
+
+def _patched_debitors_build_ui_v016(self) -> None:
+    _prev_debitors_build_ui_v016(self)
+    shell, left_outer, right_outer = _find_std_module_shell_children(self)
+    if shell is not None and left_outer is not None and right_outer is not None:
+        attach_grid_splitter(shell, left_outer, right_outer, 'Debitoren')
+    _normalize_module_button_styles(self)
+
+
+DebitorsView._build_ui = _patched_debitors_build_ui_v016
+
+
+_prev_creditors_build_ui_v016 = CreditorsView._build_ui
+
+def _patched_creditors_build_ui_v016(self) -> None:
+    _prev_creditors_build_ui_v016(self)
+    shell, left_outer, right_outer = _find_std_module_shell_children(self)
+    if shell is not None and left_outer is not None and right_outer is not None:
+        attach_grid_splitter(shell, left_outer, right_outer, 'Kreditoren')
+    _normalize_module_button_styles(self)
+
+
+CreditorsView._build_ui = _patched_creditors_build_ui_v016
+
+
+_prev_stammdaten_build_ui_v016 = StammdatenView._build_ui
+
+def _patched_stammdaten_build_ui_v016(self) -> None:
+    _prev_stammdaten_build_ui_v016(self)
+    shell, left_outer, right_outer = _find_std_module_shell_children(self)
+    if shell is not None and left_outer is not None and right_outer is not None:
+        attach_grid_splitter(shell, left_outer, right_outer, 'Stammdaten', default_ratio=0.56)
+
+
+StammdatenView._build_ui = _patched_stammdaten_build_ui_v016
+
+
+
+# === FINANCE MATE PATCH V0_6_17 ===
+APP_VERSION = "0.6.17-groundup"
+
+SIDEBAR_NUMBERED_LABELS = {
+    "Stammdaten": "01 Stammdaten",
+    "Finanzbuchhaltung": "02 Finanzbuchhaltung",
+    "Debitoren": "03 Debitoren",
+    "Kreditoren": "04 Kreditoren",
+    "Zahlungen": "05 Zahlungen",
+    "Reporting": "06 Reporting",
+    "Audit": "07 Audit",
+}
+SIDEBAR_COLLAPSED_LABELS = {
+    "Stammdaten": "01",
+    "Finanzbuchhaltung": "02",
+    "Debitoren": "03",
+    "Kreditoren": "04",
+    "Zahlungen": "05",
+    "Reporting": "06",
+    "Audit": "07",
+}
+
+
+def _fm_get_menu_button_text(module_name: str, expanded: bool = True) -> str:
+    if expanded:
+        return SIDEBAR_NUMBERED_LABELS.get(module_name, module_name)
+    return SIDEBAR_COLLAPSED_LABELS.get(module_name, SIDEBAR_ABBREVIATIONS.get(module_name, module_name[:2].upper()))
+
+
+def _fm_after_debounce(widget: tk.Widget, attr_name: str, delay_ms: int, callback):
+    old_job = getattr(widget, attr_name, None)
+    if old_job is not None:
+        try:
+            widget.after_cancel(old_job)
+        except Exception:
+            pass
+    setattr(widget, attr_name, widget.after(delay_ms, callback))
+
+
+_def_apply_sidebar_state_v017 = FinanceMateApp._apply_sidebar_state
+
+def _patched_apply_sidebar_state_v017(self):
+    _def_apply_sidebar_state_v017(self)
+    expanded = getattr(self, 'sidebar_expanded', True)
+    for module_name, btn in getattr(self, 'nav_buttons', {}).items():
+        try:
+            btn.configure(text=_fm_get_menu_button_text(module_name, expanded))
+        except Exception:
+            pass
+
+
+FinanceMateApp._apply_sidebar_state = _patched_apply_sidebar_state_v017
+
+
+def _fm_build_placeholder_module(parent: tk.Widget, title: str, hint: str, entries=None) -> tk.Frame:
+    frame = tk.Frame(parent, bg=BG)
+    frame.grid_rowconfigure(1, weight=1)
+    frame.grid_columnconfigure(0, weight=1)
+    ttk.Label(frame, text=title, style='Section.TLabel').grid(row=0, column=0, sticky='w', pady=(0, 8))
+    ttk.Label(frame, text=hint, style='Hint.TLabel', wraplength=1080, justify='left').grid(row=1, column=0, sticky='nw')
+    if entries:
+        card_outer = tk.Frame(frame, bg=CARD_BORDER)
+        card_outer.grid(row=2, column=0, sticky='nsew', pady=(12, 0))
+        card = tk.Frame(card_outer, bg=WHITE)
+        card.pack(fill='both', expand=True, padx=1, pady=1)
+        for idx, text in enumerate(entries):
+            tk.Label(card, text=f'• {text}', bg=WHITE, fg=TEXT, anchor='w', justify='left', wraplength=980, font=('Segoe UI', 10)).pack(fill='x', padx=16, pady=(10 if idx == 0 else 2, 2))
+    return frame
+
+
+_def_show_module_v017 = FinanceMateApp.show_module
+
+def _patched_show_module_v017(self, module_name: str) -> None:
+    if not hasattr(self, '_module_cache'):
+        self._module_cache = {}
+    self.active_module.set(module_name)
+    self.path_label.config(text=f"Finance Mate  >  {module_name}")
+    self.set_status(f"Modul: {module_name}  |  Datenbank: SQLite")
+    for name, button in self.nav_buttons.items():
+        try:
+            button.configure(style='NavActive.TButton' if name == module_name else 'Nav.TButton')
+        except Exception:
+            pass
+    self._apply_sidebar_state()
+
+    if module_name in self._module_cache:
+        try:
+            self._module_cache[module_name].tkraise()
+        except Exception:
+            pass
+        return
+
+    holder = tk.Frame(self.content_frame, bg=BG)
+    holder.grid(row=0, column=0, sticky='nsew')
+    holder.grid_rowconfigure(0, weight=1)
+    holder.grid_columnconfigure(0, weight=1)
+
+    if module_name == 'Stammdaten':
+        view = StammdatenView(holder, self.set_status)
+        view.grid(row=0, column=0, sticky='nsew')
+    elif module_name == 'Finanzbuchhaltung':
+        view = JournalView(holder, self.set_status)
+        view.grid(row=0, column=0, sticky='nsew')
+    elif module_name == 'Debitoren':
+        view = DebitorsView(holder, self.set_status)
+        view.grid(row=0, column=0, sticky='nsew')
+    elif module_name == 'Kreditoren':
+        view = CreditorsView(holder, self.set_status)
+        view.grid(row=0, column=0, sticky='nsew')
+    elif module_name == 'Dashboard':
+        view = _fm_build_placeholder_module(holder, 'Dashboard', 'Überblicks- und Startfläche für Finance Mate. Der Schwerpunkt der aktuellen Ausbaustufe liegt auf den transaktionalen Kernmodulen und deren Render-/Bedienhärtung.', ['Systemstart', 'Modulnavigation', 'Statuskontext', 'Nächste Ausbaupfade'])
+        view.grid(row=0, column=0, sticky='nsew')
+    elif module_name == 'Zahlungen':
+        view = _fm_build_placeholder_module(holder, 'Zahlungen', 'Nächster großer Fachblock: Teilzahlungen, Vollausgleich, OP-Abgleich und Statuswechsel.', ['Manuelle Zahlungen', 'Ausgleich Debitoren', 'Ausgleich Kreditoren', 'Teilzahlungen'])
+        view.grid(row=0, column=0, sticky='nsew')
+    elif module_name == 'Reporting':
+        view = _fm_build_placeholder_module(holder, 'Reporting', 'Platzhalter für Standardberichte, Kennzahlen und spätere Auswertungen.', ['Offene Posten', 'Fälligkeitsberichte', 'Journalübersichten'])
+        view.grid(row=0, column=0, sticky='nsew')
+    elif module_name == 'Audit':
+        view = _fm_build_placeholder_module(holder, 'Audit', 'Platzhalter für Änderungsnachweise, Kontrollpfade und spätere Rollen-/Berechtigungslogik.', ['Änderungshistorie', 'Kontrollpfade', 'Nachweisdokumentation'])
+        view.grid(row=0, column=0, sticky='nsew')
+    else:
+        view = _fm_build_placeholder_module(holder, module_name, 'Modul placeholder', [])
+        view.grid(row=0, column=0, sticky='nsew')
+
+    self._module_cache[module_name] = holder
+    holder.tkraise()
+
+
+FinanceMateApp.show_module = _patched_show_module_v017
+
+
+def _fm_iter_descendants(widget: tk.Widget):
+    for child in widget.winfo_children():
+        yield child
+        yield from _fm_iter_descendants(child)
+
+
+def _fm_adapt_block_content(container: tk.Widget) -> None:
+    def _apply():
+        try:
+            container.update_idletasks()
+            width = max(180, container.winfo_width() - 24)
+            for child in _fm_iter_descendants(container):
+                try:
+                    if isinstance(child, (tk.Label, ttk.Label)):
+                        child.configure(wraplength=max(140, width - 24), justify='left')
+                    elif isinstance(child, ttk.Treeview):
+                        cols = list(child['columns'])
+                        if cols:
+                            for col in cols:
+                                try:
+                                    current_width = int(child.column(col, option='width') or 120)
+                                except Exception:
+                                    current_width = 120
+                                try:
+                                    child.column(col, stretch=True, minwidth=max(60, int(current_width * 0.55)))
+                                except Exception:
+                                    pass
+                                # Auto x-scroll for narrow right blocks
+                            if not getattr(child, '_fm_xscroll_attached', False):
+                                parent = child.master
+                                try:
+                                    xscroll = ttk.Scrollbar(parent, orient='horizontal', command=child.xview)
+                                    child.configure(xscrollcommand=xscroll.set)
+                                    info = child.grid_info()
+                                    row = int(info.get('row', 0))
+                                    col = int(info.get('column', 0))
+                                    col_span = int(info.get('columnspan', 1))
+                                    xscroll.grid(row=row + 1, column=col, columnspan=col_span, sticky='ew')
+                                    child._fm_xscroll_attached = True
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    _fm_after_debounce(container, '_fm_adapt_job', 25, _apply)
+    container.bind('<Configure>', lambda _e: _fm_after_debounce(container, '_fm_adapt_job', 25, _apply), add='+')
+    container.after(120, _apply)
+
+
+def _fm_style_action_buttons_like_confirm(widget: tk.Widget) -> None:
+    targets = {'Fälligkeit nach Zahlungsbedingung berechnen', 'Felder leeren'}
+    for child in _fm_iter_descendants(widget):
+        try:
+            label = str(child.cget('text')) if hasattr(child, 'cget') else ''
+        except Exception:
+            label = ''
+        if label in targets:
+            try:
+                if isinstance(child, ttk.Button):
+                    child.configure(style='Confirm.TButton')
+                elif isinstance(child, tk.Button):
+                    child.configure(
+                        bg=STANDARD_BUTTON_BG,
+                        activebackground='#D3D0C8',
+                        fg=TEXT,
+                        activeforeground=TEXT,
+                        relief='raised',
+                        overrelief='raised',
+                        bd=1,
+                        highlightthickness=0,
+                        highlightbackground=STANDARD_BUTTON_BORDER,
+                        font=('Segoe UI', 9, 'bold'),
+                        padx=BUTTON_RELIEF_PADX,
+                        pady=BUTTON_RELIEF_PADY,
+                        height=1,
+                        cursor='hand2',
+                    )
+            except Exception:
+                pass
+
+
+def _fm_attach_stammdaten_tree_improvements(view) -> None:
+    for tab_name, tree in getattr(view, 'trees', {}).items():
+        try:
+            current_h = int(tree.cget('height')) if str(tree.cget('height')).isdigit() else 12
+        except Exception:
+            current_h = 12
+        try:
+            tree.configure(height=max(current_h + 4, int(round(current_h * 1.30))))
+        except Exception:
+            pass
+        if tab_name in {'Debitoren', 'Kreditoren'} and not getattr(tree, '_fm_bottom_xscroll', False):
+            try:
+                parent = tree.master
+                xscroll = ttk.Scrollbar(parent, orient='horizontal', command=tree.xview)
+                tree.configure(xscrollcommand=xscroll.set)
+                info = tree.grid_info()
+                row = int(info.get('row', 0))
+                xscroll.grid(row=row + 1, column=0, columnspan=2, sticky='ew')
+                tree._fm_bottom_xscroll = True
+            except Exception:
+                pass
+        try:
+            for col in tree['columns']:
+                tree.column(col, stretch=True)
+        except Exception:
+            pass
+
+
+
+def attach_grid_splitter(container: tk.Widget, left_widget: tk.Widget, right_widget: tk.Widget, module_key: str, default_ratio: float = 0.60) -> None:
+    old_line = getattr(container, '_fm_free_splitter_line', None)
+    if old_line is not None:
+        try:
+            old_line.destroy()
+        except Exception:
+            pass
+
+    line = tk.Frame(container, bg=SPLITTER_LINE_BG, cursor='sb_h_double_arrow', width=SPLITTER_WIDTH)
+    container._fm_free_splitter_line = line
+    gap = 16
+    state = {'sash_x': None, 'dragging': False}
+
+    def _available_width() -> int:
+        container.update_idletasks()
+        width = container.winfo_width()
+        if width <= 1:
+            width = max(320, left_widget.winfo_reqwidth() + right_widget.winfo_reqwidth() + gap)
+        return max(320, width)
+
+    def _available_height() -> int:
+        container.update_idletasks()
+        return max(160, container.winfo_height())
+
+    def _load_default_sash() -> int:
+        raw = load_ui_preference('splitter', module_key, '')
+        if raw:
+            try:
+                return int(float(raw))
+            except Exception:
+                pass
+        return int(round(_available_width() * default_ratio))
+
+    def _clamp_sash(x_pos: int) -> int:
+        total = _available_width()
+        return max(24, min(total - 24, int(x_pos)))
+
+    def _prepare_place_mode() -> None:
+        for widget in (left_widget, right_widget):
+            try:
+                widget.grid_forget()
+            except Exception:
+                pass
+            try:
+                widget.lift()
+            except Exception:
+                pass
+
+    def _apply(sash_x: int | None = None, persist: bool = False) -> None:
+        _prepare_place_mode()
+        total_w = _available_width()
+        total_h = _available_height()
+        if sash_x is None:
+            sash_x = state['sash_x'] if state['sash_x'] is not None else _load_default_sash()
+        sash_x = _clamp_sash(sash_x)
+        left_w = max(1, sash_x - gap // 2)
+        right_x = min(total_w - 1, sash_x + gap // 2)
+        right_w = max(1, total_w - right_x)
+        state['sash_x'] = sash_x
+        try:
+            left_widget.place(x=0, y=0, width=left_w, height=total_h)
+        except Exception:
+            pass
+        try:
+            right_widget.place(x=right_x, y=0, width=right_w, height=total_h)
+        except Exception:
+            pass
+        try:
+            line.place(x=max(0, sash_x - SPLITTER_WIDTH // 2), y=0, width=SPLITTER_WIDTH, height=total_h)
+            line.lift()
+        except Exception:
+            pass
+        try:
+            _fm_adapt_block_content(right_widget)
+        except Exception:
+            pass
+        if persist:
+            try:
+                save_ui_preference('splitter', module_key, str(sash_x))
+            except Exception:
+                pass
+
+    def _drag_start(_event=None):
+        state['dragging'] = True
+        try:
+            line.configure(bg=SPLITTER_LINE_ACTIVE)
+        except Exception:
+            pass
+
+    def _drag(event):
+        x_local = event.x_root - container.winfo_rootx()
+        _apply(x_local)
+        return 'break'
+
+    def _drag_stop(_event=None):
+        state['dragging'] = False
+        try:
+            line.configure(bg=SPLITTER_LINE_BG)
+        except Exception:
+            pass
+        _apply(state.get('sash_x'), persist=True)
+
+    def _on_container_configure(_event=None):
+        if state['dragging']:
+            return
+        _fm_after_debounce(container, '_fm_splitter_resize_job', 18, lambda: _apply(state.get('sash_x')))
+
+    line.bind('<ButtonPress-1>', _drag_start)
+    line.bind('<B1-Motion>', _drag)
+    line.bind('<ButtonRelease-1>', _drag_stop)
+    container.bind('<Configure>', _on_container_configure, add='+')
+    container.after(100, lambda: _apply())
+
+
+
+def _find_std_module_shell_children(view: tk.Widget):
+    shell = _find_module_shell(view)
+    if shell is None:
+        return None, None, None
+    children = _grid_children_sorted(shell)
+    if len(children) < 2:
+        frames = [child for child in shell.winfo_children() if isinstance(child, tk.Frame)]
+        if len(frames) >= 2:
+            children = frames
+    if len(children) < 2:
+        return shell, None, None
+    return shell, children[0], children[1]
+
+
+_prev_journal_build_ui_v017 = JournalView._build_ui
+
+def _patched_journal_build_ui_v017(self) -> None:
+    _prev_journal_build_ui_v017(self)
+    shell, left_outer, right_outer = _find_std_module_shell_children(self)
+    if shell is not None and left_outer is not None and right_outer is not None:
+        attach_grid_splitter(shell, left_outer, right_outer, 'Finanzbuchhaltung')
+        _fm_adapt_block_content(right_outer)
+
+
+JournalView._build_ui = _patched_journal_build_ui_v017
+
+
+_prev_debitors_build_ui_v017 = DebitorsView._build_ui
+
+def _patched_debitors_build_ui_v017(self) -> None:
+    _prev_debitors_build_ui_v017(self)
+    shell, left_outer, right_outer = _find_std_module_shell_children(self)
+    if shell is not None and left_outer is not None and right_outer is not None:
+        attach_grid_splitter(shell, left_outer, right_outer, 'Debitoren')
+        _fm_adapt_block_content(right_outer)
+    _fm_style_action_buttons_like_confirm(self)
+    _normalize_module_button_styles(self)
+
+
+DebitorsView._build_ui = _patched_debitors_build_ui_v017
+
+
+_prev_creditors_build_ui_v017 = CreditorsView._build_ui
+
+def _patched_creditors_build_ui_v017(self) -> None:
+    _prev_creditors_build_ui_v017(self)
+    shell, left_outer, right_outer = _find_std_module_shell_children(self)
+    if shell is not None and left_outer is not None and right_outer is not None:
+        attach_grid_splitter(shell, left_outer, right_outer, 'Kreditoren')
+        _fm_adapt_block_content(right_outer)
+    _fm_style_action_buttons_like_confirm(self)
+    _normalize_module_button_styles(self)
+
+
+CreditorsView._build_ui = _patched_creditors_build_ui_v017
+
+
+_prev_stammdaten_build_ui_v017 = StammdatenView._build_ui
+
+def _patched_stammdaten_build_ui_v017(self) -> None:
+    _prev_stammdaten_build_ui_v017(self)
+    shell, left_outer, right_outer = _find_std_module_shell_children(self)
+    if shell is not None and left_outer is not None and right_outer is not None:
+        attach_grid_splitter(shell, left_outer, right_outer, 'Stammdaten', default_ratio=0.56)
+        _fm_adapt_block_content(right_outer)
+    self.after(140, lambda s=self: _fm_attach_stammdaten_tree_improvements(s))
+
+
+StammdatenView._build_ui = _patched_stammdaten_build_ui_v017
 
 
 def main() -> None:
